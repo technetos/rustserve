@@ -9,6 +9,7 @@ use http::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 pub struct UsersController {
 }
@@ -39,6 +40,7 @@ impl Controller for UsersController {
     fn get<'a>(
         self: Arc<Self>,
         req: Request<&'a [u8]>,
+        params: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
         Box::pin(async move { Ok(serialize(self.clone().get_user(req.map(|_| ())).await?)?) })
     }
@@ -46,6 +48,7 @@ impl Controller for UsersController {
     fn post<'a>(
         self: Arc<Self>,
         req: Request<&'a [u8]>,
+        params: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
         let req = match deserialize(req) {
             Ok(r) => r,

@@ -2,6 +2,7 @@ use http::{Request, Response};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 // ----------------------------
 // Errors
@@ -44,6 +45,7 @@ macro_rules! generate_http_method {
         fn $method_name<'a>(
             self: Arc<Self>,
             _: Request<&'a [u8]>,
+            _: HashMap<String, String>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
             self.not_found(anyhow::Error::msg(""))
         }
@@ -112,6 +114,7 @@ macro_rules! delegate_to_inner_controller {
         fn $controller_method<'a>(
             self: Arc<Self>,
             request: Request<&'a [u8]>,
+            params: HashMap<String, String>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
             Box::pin(async move {
                 let mut req = request;
@@ -125,7 +128,7 @@ macro_rules! delegate_to_inner_controller {
                     }
                 }
 
-                self.controller.clone().$controller_method(req).await
+                self.controller.clone().$controller_method(req, params).await
             })
         }
     };
