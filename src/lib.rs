@@ -182,10 +182,11 @@ pub struct DynamicSegment {
 pub struct Route {
     dynamic_segments: Vec<DynamicSegment>,
     static_segments: Vec<StaticSegment>,
+    controller: Arc<dyn Controller>,
 }
 
 impl Route {
-    pub fn new(s: impl Into<String>) -> Self {
+    pub fn new(s: impl Into<String>, controller: Arc<dyn Controller>) -> Self {
         let input = s.into();
 
         let (static_segments_vec, dynamic_segments_vec) = input
@@ -213,7 +214,22 @@ impl Route {
         Self {
             dynamic_segments,
             static_segments,
+            controller,
         }
+    }
+
+    pub fn extract_params(&self, path: &str) -> HashMap<String, String> {
+        let segments = path.split("/").filter(|s| s != &"").collect::<Vec<_>>();
+
+        self.dynamic_segments
+            .iter()
+            .fold(HashMap::new(), |mut hash_map, segment| {
+                hash_map.insert(
+                    segment.name.clone(),
+                    String::from(segments[segment.position]),
+                );
+                hash_map
+            })
     }
 }
 
@@ -250,4 +266,34 @@ impl PartialEq<Route> for RawRoute {
     fn eq(&self, other: &Route) -> bool {
         other == self
     }
+}
+
+pub async fn route_request<'a>(
+    req: Request<&'a [u8]>,
+    routes: &[Route],
+) -> anyhow::Result<Response<Vec<u8>>> {
+    let method = req.method().as_str();
+    let path = req.uri().path();
+
+    let res = if let Some(route) = routes.iter().find(|route| **route == RawRoute::new(path)) {
+        let params = route.extract_params(path);
+        let controller = route.controller.clone();
+        match method {
+            "GET" => controller.get(req, params),
+            "HEAD" => controller.head(req, params),
+            "POST" => controller.post(req, params),
+            "PUT" => controller.put(req, params),
+            "DELETE" => controller.delete(req, params),
+            "CONNECT" => controller.connect(req, params),
+            "OPTIONS" => controller.options(req, params),
+            "TRACE" => controller.trace(req, params),
+            "PATCH" => controller.patch(req, params),
+            _ => controller.bad_request(anyhow::Error::msg("unsupported HTTP method")),
+        }
+        .await
+    } else {
+        not_found().await
+    };
+
+    Ok(res?)
 }

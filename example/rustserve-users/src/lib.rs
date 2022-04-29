@@ -6,29 +6,22 @@ use rustserve::{deserialize, serialize};
 
 use http::{Request, Response};
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::collections::HashMap;
 
-pub struct UsersController {
-}
+pub struct UsersController {}
 
 impl UsersController {
-    async fn get_user(
-        self: Arc<Self>,
-        _user_id: String,
-    ) -> anyhow::Result<Response<()>> {
+    async fn get_user(self: Arc<Self>, _user_id: String) -> anyhow::Result<Response<()>> {
         Ok(Response::builder()
             .status(200)
             .body(())
             .map_err(anyhow::Error::from)?)
     }
 
-    async fn create_user(
-        self: Arc<Self>,
-        _req: Request<()>,
-    ) -> anyhow::Result<Response<()>> {
+    async fn create_user(self: Arc<Self>, _req: Request<()>) -> anyhow::Result<Response<()>> {
         Ok(Response::builder()
             .status(200)
             .body(())
@@ -44,8 +37,11 @@ impl Controller for UsersController {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
         let user_id = match params.get("user_id") {
             Some(user_id) => user_id,
-            None => return self.internal_server_error(anyhow::Error::msg("missing user_id parameter")),
-        }.clone();
+            None => {
+                return self.internal_server_error(anyhow::Error::msg("missing user_id parameter"))
+            }
+        }
+        .clone();
 
         Box::pin(async move { Ok(serialize(self.clone().get_user(user_id).await?)?) })
     }
