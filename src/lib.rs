@@ -19,11 +19,17 @@ macro_rules! generate_http_error_method {
 
 pub trait HttpError: Send + Sync {
     generate_http_error_method!(not_found);
+    generate_http_error_method!(bad_request);
     generate_http_error_method!(internal_server_error);
+
 }
 
 pub async fn not_found() -> anyhow::Result<Response<Vec<u8>>> {
     Ok(serialize(Response::builder().status(404).body(())?)?)
+}
+
+pub async fn bad_request() -> anyhow::Result<Response<Vec<u8>>> {
+    Ok(serialize(Response::builder().status(400).body(())?)?)
 }
 
 pub async fn internal_server_error() -> anyhow::Result<Response<Vec<u8>>> {
