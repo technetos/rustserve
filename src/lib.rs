@@ -1,8 +1,8 @@
 use http::{Request, Response};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::collections::HashMap;
 
 // ----------------------------
 // Errors
@@ -22,7 +22,6 @@ pub trait HttpError: Send + Sync {
     generate_http_error_method!(not_found);
     generate_http_error_method!(bad_request);
     generate_http_error_method!(internal_server_error);
-
 }
 
 pub async fn not_found() -> anyhow::Result<Response<Vec<u8>>> {
@@ -93,7 +92,7 @@ where
 // Guards
 
 pub enum Outcome<'a> {
-    Forward(Request<&'a [u8]>),
+    Forward(Request<&'a [u8]>, HashMap<String, String>),
     Respond(Response<Vec<u8>>),
 }
 
@@ -101,6 +100,7 @@ pub trait Guard: Send + Sync {
     fn verify<'a>(
         self: Arc<Self>,
         _: Request<&'a [u8]>,
+        _: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = Outcome<'a>> + Send>>;
 }
 
@@ -114,21 +114,26 @@ macro_rules! delegate_to_inner_controller {
         fn $controller_method<'a>(
             self: Arc<Self>,
             request: Request<&'a [u8]>,
-            params: HashMap<String, String>,
+            parameters: HashMap<String, String>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
             Box::pin(async move {
                 let mut req = request;
+                let mut params = parameters;
                 for guard in self.clone().guards.iter() {
-                    match guard.clone().verify(req).await {
-                        Outcome::Forward(forwarded_req) => {
+                    match guard.clone().verify(req, params).await {
+                        Outcome::Forward(forwarded_req, forwarded_params) => {
                             req = forwarded_req;
+                            params = forwarded_params;
                             continue;
                         }
                         Outcome::Respond(res) => return Ok(res),
                     }
                 }
 
-                self.controller.clone().$controller_method(req, params).await
+                self.controller
+                    .clone()
+                    .$controller_method(req, params)
+                    .await
             })
         }
     };

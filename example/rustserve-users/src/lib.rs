@@ -17,7 +17,7 @@ pub struct UsersController {
 impl UsersController {
     async fn get_user(
         self: Arc<Self>,
-        req: Request<()>,
+        _user_id: String,
     ) -> anyhow::Result<Response<()>> {
         Ok(Response::builder()
             .status(200)
@@ -27,7 +27,7 @@ impl UsersController {
 
     async fn create_user(
         self: Arc<Self>,
-        req: Request<()>,
+        _req: Request<()>,
     ) -> anyhow::Result<Response<()>> {
         Ok(Response::builder()
             .status(200)
@@ -39,16 +39,21 @@ impl UsersController {
 impl Controller for UsersController {
     fn get<'a>(
         self: Arc<Self>,
-        req: Request<&'a [u8]>,
+        _req: Request<&'a [u8]>,
         params: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-        Box::pin(async move { Ok(serialize(self.clone().get_user(req.map(|_| ())).await?)?) })
+        let user_id = match params.get("user_id") {
+            Some(user_id) => user_id,
+            None => return self.internal_server_error(anyhow::Error::msg("missing user_id parameter")),
+        }.clone();
+
+        Box::pin(async move { Ok(serialize(self.clone().get_user(user_id).await?)?) })
     }
 
     fn post<'a>(
         self: Arc<Self>,
         req: Request<&'a [u8]>,
-        params: HashMap<String, String>,
+        _params: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
         let req = match deserialize(req) {
             Ok(r) => r,
