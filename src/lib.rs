@@ -163,6 +163,7 @@ macro_rules! delegate_to_inner_http_error_method {
 }
 impl HttpError for Protect {
     delegate_to_inner_http_error_method!(not_found);
+    delegate_to_inner_http_error_method!(bad_request);
     delegate_to_inner_http_error_method!(internal_server_error);
 }
 
