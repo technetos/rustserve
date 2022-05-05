@@ -18,6 +18,19 @@ macro_rules! generate_http_error_method {
     };
 }
 
+/// A trait providing HTTP error methods to Controllers with default implementations.
+///
+/// When your controller implements this trait, the controllers implementations will be called when
+/// an error occurs.  You can also invoke them yourself through `self.error_method()`. All error
+/// methods have defaults, you dont have to implement any of them.  The default implementations
+/// only return the error code, no error message of any kind is returned to the client.  When
+/// implementing an error method, you have access to the error as an argument `e: anyhow::Error`
+/// that you can return to the client. You can also simply return
+/// `Response::builder().status(XXX).body(())?` to return any error code with any body that you
+/// want.  These methods exist purely for the ability to have different specific error method
+/// implementations for each controller and for those implementations to be reachable from code
+/// working with a `dyn Controller`. Only very commonly used error methods are defined in this
+/// trait, if you feel other error codes should be supported here please make a PR.
 pub trait HttpError: Send + Sync {
     generate_http_error_method!(not_found);
     generate_http_error_method!(bad_request);
@@ -66,6 +79,8 @@ pub trait Controller: HttpError + Send + Sync {
 // ----------------------------
 // Serde
 
+/// A convienence function for converting an `http::Response<T>` to an `http::Response<Vec<u8>>`
+/// using JSON serialization.
 pub fn serialize<T>(req: Response<T>) -> anyhow::Result<Response<Vec<u8>>>
 where
     T: serde::Serialize,
@@ -77,6 +92,8 @@ where
     ))
 }
 
+/// A convienence function for converting an `http::Request<&[u8]>` to an `http::Request<T>` using
+/// JSON deserialization.
 pub fn deserialize<'a, T>(req: Request<&'a [u8]>) -> anyhow::Result<Request<T>>
 where
     T: serde::Deserialize<'a>,
@@ -91,17 +108,32 @@ where
 // ----------------------------
 // Guards
 
+/// The output of a guard verifying a request
+///
+/// Outcome can be a `Forward(req, params)` or a `Respond(res)`.
+///
+/// + `Forward` returns the request and the parameters parsed from the path.  `Protect` use an
+///    array of guards to implement layers of request verification per controller.  The next guard in
+///    a `Protect` controller consumes the forwarded request and params for additional verification
+///    until all guards have verified the request.  Finally the request is passed to the controller
+///    by calling the corresponding `http` method.
+/// + `Respond` returns an `http::Response<Vec<u8>>` immediately back to the client.
 pub enum Outcome<'a> {
     Forward(Request<&'a [u8]>, HashMap<String, String>),
     Respond(Response<Vec<u8>>),
 }
 
+/// A trait providing a filtering mechanism for requests.
+///
+/// Guards are used by `Protect` to `verify` that a request meets a specific criteria.  Guards are
+/// evaluated in a short circut fashion, each guard returns an `Outcome` that can either `Forward`
+/// the request or `Respond` immediately.  
 pub trait Guard: Send + Sync {
     fn verify<'a>(
         self: Arc<Self>,
         _: Request<&'a [u8]>,
         _: HashMap<String, String>,
-    ) -> Pin<Box<dyn Future<Output = Outcome<'a>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>>;
 }
 
 pub struct Protect {
@@ -121,12 +153,13 @@ macro_rules! delegate_to_inner_controller {
                 let mut params = parameters;
                 for guard in self.clone().guards.iter() {
                     match guard.clone().verify(req, params).await {
-                        Outcome::Forward(forwarded_req, forwarded_params) => {
+                        Ok(Outcome::Forward(forwarded_req, forwarded_params)) => {
                             req = forwarded_req;
                             params = forwarded_params;
                             continue;
                         }
-                        Outcome::Respond(res) => return Ok(res),
+                        Ok(Outcome::Respond(res)) => return Ok(res),
+                        Err(e) => return self.internal_server_error(e).await,
                     }
                 }
 
@@ -161,6 +194,7 @@ macro_rules! delegate_to_inner_http_error_method {
         }
     };
 }
+
 impl HttpError for Protect {
     delegate_to_inner_http_error_method!(not_found);
     delegate_to_inner_http_error_method!(bad_request);
