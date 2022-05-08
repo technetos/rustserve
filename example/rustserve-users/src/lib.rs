@@ -13,7 +13,12 @@ use std::sync::Arc;
 
 // A guard for any request that requires the user be logged in
 
-struct UserGuard {}
+struct UserGuard {
+    // A mock example of a database of users.  Ideally the UserGuard would have a
+    // user_service: Arc<UserService> and would perform actual user checks using
+    // that service.
+    valid_user_ids: Vec<String>,
+}
 
 impl Guard for UserGuard {
     fn verify<'a>(
@@ -23,8 +28,18 @@ impl Guard for UserGuard {
         errors: Arc<dyn HttpError>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>> {
         Box::pin(async move {
+            if let Some(user_id) = params.get("user_id") {
+                if self.valid_user_ids.contains(user_id) {
+                    return Ok(Outcome::Forward(req, params));
+                }
+            }
             Ok(Outcome::Respond(
-                errors.unauthorized(anyhow::Error::msg("")).await?,
+                // The error handler passed into verify is the controller that this guard is
+                // protecting.  Each controller defines how its errors behave all the way down
+                // the call stack.
+                errors
+                    .unauthorized(anyhow::Error::msg("unauthorized access"))
+                    .await?,
             ))
         })
     }
