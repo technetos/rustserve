@@ -20,7 +20,7 @@ macro_rules! generate_http_error_method {
     };
 }
 
-/// A trait providing HTTP error methods to Controllers with default implementations.
+/// A trait providing HTTP error methods to Controllers.
 ///
 /// When your controller implements this trait, the controllers implementations will be called when
 /// an error occurs.  You can also invoke them yourself through `self.error_method()`. All error
@@ -40,19 +40,19 @@ pub trait HttpError: Send + Sync {
     generate_http_error_method!(internal_server_error);
 }
 
-pub async fn not_found() -> anyhow::Result<Response<Vec<u8>>> {
+async fn not_found() -> anyhow::Result<Response<Vec<u8>>> {
     Ok(serialize(Response::builder().status(404).body(())?)?)
 }
 
-pub async fn bad_request() -> anyhow::Result<Response<Vec<u8>>> {
+async fn bad_request() -> anyhow::Result<Response<Vec<u8>>> {
     Ok(serialize(Response::builder().status(400).body(())?)?)
 }
 
-pub async fn unauthorized() -> anyhow::Result<Response<Vec<u8>>> {
+async fn unauthorized() -> anyhow::Result<Response<Vec<u8>>> {
     Ok(serialize(Response::builder().status(401).body(())?)?)
 }
 
-pub async fn internal_server_error() -> anyhow::Result<Response<Vec<u8>>> {
+async fn internal_server_error() -> anyhow::Result<Response<Vec<u8>>> {
     Ok(serialize(Response::builder().status(500).body(())?)?)
 }
 
@@ -71,6 +71,13 @@ macro_rules! generate_http_method {
     };
 }
 
+/// A trait providing methods to handle HTTP requests.  
+///
+/// Controllers are how RustServe handles HTTP requests.  Routes store an `Arc<dyn Controller>` and
+/// controllers implement the HTTP methods for that route. All controller methods have defaults,
+/// you dont have to implement any of them.  If you dont implement a method, then requests on that
+/// route to that method return a 404, its not there, you didnt implement it.  By implementing a
+/// controller method, requests with that HTTP method will be routed to your implementation.  
 pub trait Controller: HttpError + Send + Sync {
     generate_http_method!(get);
     generate_http_method!(head);
@@ -86,6 +93,8 @@ pub trait Controller: HttpError + Send + Sync {
 // ----------------------------
 // Serde
 
+/// Serialize the body of a `Response<T: Serialize>` into a `Response<Vec<u8>>`
+///
 /// A convienence function for converting an `http::Response<T>` to an `http::Response<Vec<u8>>`
 /// using JSON serialization.
 pub fn serialize<T>(req: Response<T>) -> anyhow::Result<Response<Vec<u8>>>
@@ -99,6 +108,8 @@ where
     ))
 }
 
+/// Deserialize the body of a `Request<&[u8]>` into a `Request<T: Deserialize>`
+///
 /// A convienence function for converting an `http::Request<&[u8]>` to an `http::Request<T>` using
 /// JSON deserialization.
 pub fn deserialize<'a, T>(req: Request<&'a [u8]>) -> anyhow::Result<Request<T>>
@@ -115,7 +126,7 @@ where
 // ----------------------------
 // Guards
 
-/// The output of a guard verifying a request
+/// The output of a guard verifying a request.
 ///
 /// Outcome can be a `Forward(req, params)` or a `Respond(res)`.
 ///
@@ -146,12 +157,18 @@ pub trait Guard: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>>;
 }
 
+/// A wrapper around a `Controller` that evaluates its `Guards` before delegating to the inner
+/// `Controller`.
+///
+/// `Protect` is a composite `Controller` that wraps an inner `Controller` along with a series of
+/// `Guards`.  When a request is routed to a _protected_ `Controller` the series of `Guards`
+/// evaluate the request in a short circut fashion before delegating to the inner controller.  
 pub struct Protect {
     pub guards: Vec<Arc<dyn Guard>>,
     pub controller: Arc<dyn Controller>,
 }
 
-macro_rules! delegate_to_inner_controller {
+macro_rules! evaluate_guards_then_delegate_to_inner_controller {
     ($controller_method:ident) => {
         fn $controller_method<'a>(
             self: Arc<Self>,
@@ -193,15 +210,15 @@ macro_rules! delegate_to_inner_controller {
 }
 
 impl Controller for Protect {
-    delegate_to_inner_controller!(get);
-    delegate_to_inner_controller!(head);
-    delegate_to_inner_controller!(post);
-    delegate_to_inner_controller!(put);
-    delegate_to_inner_controller!(delete);
-    delegate_to_inner_controller!(connect);
-    delegate_to_inner_controller!(options);
-    delegate_to_inner_controller!(trace);
-    delegate_to_inner_controller!(patch);
+    evaluate_guards_then_delegate_to_inner_controller!(get);
+    evaluate_guards_then_delegate_to_inner_controller!(head);
+    evaluate_guards_then_delegate_to_inner_controller!(post);
+    evaluate_guards_then_delegate_to_inner_controller!(put);
+    evaluate_guards_then_delegate_to_inner_controller!(delete);
+    evaluate_guards_then_delegate_to_inner_controller!(connect);
+    evaluate_guards_then_delegate_to_inner_controller!(options);
+    evaluate_guards_then_delegate_to_inner_controller!(trace);
+    evaluate_guards_then_delegate_to_inner_controller!(patch);
 }
 
 macro_rules! delegate_to_inner_http_error_method {
@@ -225,16 +242,22 @@ impl HttpError for Protect {
 // ----------------------------
 // Routing
 
-pub struct StaticSegment {
+struct StaticSegment {
     content: String,
     position: usize,
 }
 
-pub struct DynamicSegment {
+struct DynamicSegment {
     name: String,
     position: usize,
 }
 
+/// A path and controller reachable by `HTTP` requests
+///
+/// Routes are defined by the path to be matched against an incoming request and the controller to
+/// handle the request.  Path are formatted using `:` to designate a dynamic segment.  For example
+/// in the path `/:version/test`, `version` is a dynamic segment, it can be 1, 2, 3, or anything
+/// really, and `test` is a static segment that must be matched exactly.  
 pub struct Route {
     dynamic_segments: Vec<DynamicSegment>,
     static_segments: Vec<StaticSegment>,
@@ -300,7 +323,7 @@ impl PartialEq<RawRoute> for Route {
     }
 }
 
-pub struct RawRoute {
+struct RawRoute {
     content: Vec<String>,
 }
 
@@ -324,6 +347,10 @@ impl PartialEq<Route> for RawRoute {
     }
 }
 
+/// Route a request to a controller or return not found
+///
+/// A function providing routing support.  Takes in a request and the routes and delegates to the
+/// controller associated to the route if a route exists.  
 pub async fn route_request<'a>(
     req: Request<&'a [u8]>,
     routes: &[Route],
