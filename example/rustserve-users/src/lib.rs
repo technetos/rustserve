@@ -11,6 +11,27 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+// A guard for any request that requires the user be logged in
+
+struct UserGuard {}
+
+impl Guard for UserGuard {
+    fn verify<'a>(
+        self: Arc<Self>,
+        req: Request<&'a [u8]>,
+        params: HashMap<String, String>,
+        errors: Arc<dyn HttpError>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(Outcome::Respond(
+                errors.unauthorized(anyhow::Error::msg("")).await?,
+            ))
+        })
+    }
+}
+
+// A controller for managing users, creating, updating, so on
+
 pub struct UsersController {}
 
 impl UsersController {
@@ -35,14 +56,7 @@ impl Controller for UsersController {
         _req: Request<&'a [u8]>,
         params: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-        let user_id = match params.get("user_id") {
-            Some(user_id) => user_id,
-            None => {
-                return self.internal_server_error(anyhow::Error::msg("missing user_id parameter"))
-            }
-        }
-        .clone();
-
+        let user_id = params.get("user_id").unwrap().clone();
         Box::pin(async move { Ok(serialize(self.clone().get_user(user_id).await?)?) })
     }
 
@@ -79,6 +93,17 @@ impl HttpError for UsersController {
         Box::pin(async move {
             Ok(serialize(
                 Response::builder().status(400).body(format!("{e}"))?,
+            )?)
+        })
+    }
+
+    fn unauthorized(
+        self: Arc<Self>,
+        e: anyhow::Error,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
+        Box::pin(async move {
+            Ok(serialize(
+                Response::builder().status(401).body(format!("{e}"))?,
             )?)
         })
     }

@@ -1,3 +1,5 @@
+#![feature(trait_upcasting)]
+
 use http::{Request, Response};
 use std::collections::HashMap;
 use std::future::Future;
@@ -34,6 +36,7 @@ macro_rules! generate_http_error_method {
 pub trait HttpError: Send + Sync {
     generate_http_error_method!(not_found);
     generate_http_error_method!(bad_request);
+    generate_http_error_method!(unauthorized);
     generate_http_error_method!(internal_server_error);
 }
 
@@ -43,6 +46,10 @@ pub async fn not_found() -> anyhow::Result<Response<Vec<u8>>> {
 
 pub async fn bad_request() -> anyhow::Result<Response<Vec<u8>>> {
     Ok(serialize(Response::builder().status(400).body(())?)?)
+}
+
+pub async fn unauthorized() -> anyhow::Result<Response<Vec<u8>>> {
+    Ok(serialize(Response::builder().status(401).body(())?)?)
 }
 
 pub async fn internal_server_error() -> anyhow::Result<Response<Vec<u8>>> {
@@ -131,8 +138,11 @@ pub enum Outcome<'a> {
 pub trait Guard: Send + Sync {
     fn verify<'a>(
         self: Arc<Self>,
-        _: Request<&'a [u8]>,
-        _: HashMap<String, String>,
+        req: Request<&'a [u8]>,
+        params: HashMap<String, String>,
+        // using experimental feature trait_upcasting to enforce contract and prevent guards from
+        // interacting with the controller in anyway other than error methods
+        error: Arc<dyn HttpError>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>>;
 }
 
@@ -152,14 +162,24 @@ macro_rules! delegate_to_inner_controller {
                 let mut req = request;
                 let mut params = parameters;
                 for guard in self.clone().guards.iter() {
-                    match guard.clone().verify(req, params).await {
+                    match guard
+                        .clone()
+                        .verify(req, params, self.controller.clone())
+                        .await
+                    {
                         Ok(Outcome::Forward(forwarded_req, forwarded_params)) => {
                             req = forwarded_req;
                             params = forwarded_params;
                             continue;
                         }
                         Ok(Outcome::Respond(res)) => return Ok(res),
-                        Err(e) => return self.internal_server_error(e).await,
+                        Err(e) => {
+                            return self
+                                .controller
+                                .clone()
+                                .internal_server_error(e.into())
+                                .await
+                        }
                     }
                 }
 
@@ -198,6 +218,7 @@ macro_rules! delegate_to_inner_http_error_method {
 impl HttpError for Protect {
     delegate_to_inner_http_error_method!(not_found);
     delegate_to_inner_http_error_method!(bad_request);
+    delegate_to_inner_http_error_method!(unauthorized);
     delegate_to_inner_http_error_method!(internal_server_error);
 }
 
