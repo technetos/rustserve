@@ -80,4 +80,51 @@ Ok! There is a lot going on here, lets break it down
           })
       }
     }
-   
+
+Cool! So now POST requests to this controller return a 200.  Lets implement an
+`HttpError` method so we can understand more about how our errors are being
+handled in our post implementation. 
+
+.. code-block:: rust
+
+   impl HttpError for MyController {
+      fn internal_server_error(
+          self: Arc<Self>,
+          e: anyhow::Error,
+      ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
+          Box::pin(async move {
+              Ok(serialize(
+                  Response::builder().status(500).body(format!("{e}"))?,
+              )?)
+          })
+      }
+   }
+
+Whew! Again there is a lot going on, lets break it down
+
+.. code-block:: rust
+   impl HttpError for MyController {
+      // We are implementing the `internal_server_error` method, this means when
+      // internal_server_error is called on this controller, it will use our
+      // implementation.
+      fn internal_server_error(
+          // Self is an Arc<Self>, meaning that you can only use controller
+          // methods when your controller is an Arc<dyn HttpError>.   
+          self: Arc<Self>,
+          // The error that ocurred is passed as a parameter.  
+          e: anyhow::Error,
+      // The return type is a Future that outputs a Result<Response<Vec<u8>>>
+      ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
+          // Create a future
+          Box::pin(async move {
+              // Return a Result<Response<Vec<u8>>> by passing a 500 response to
+              // the serialize function.  We are also setting the body of the
+              // response to be the error we received as an argument.  
+              Ok(serialize(
+                  Response::builder().status(500).body(format!("{e}"))?,
+              )?)
+          })
+      }
+   }
+
+
