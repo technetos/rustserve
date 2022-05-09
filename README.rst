@@ -65,7 +65,7 @@ Ok! There is a lot going on here, lets break it down
       // controller will use our `post` implementation
       fn post<'a>(
           // Self is an Arc<Self>, meaning that you can only use controller
-          methods when your controller is an Arc<dyn Controller>.  
+          // methods when your controller is an Arc<dyn Controller>.  
           self: Arc<Self>,
           // The request with its body as a series of bytes
           _req: Request<&'a [u8]>,
