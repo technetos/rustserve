@@ -40,7 +40,7 @@ That's it!  Lets go over some details about whats going on here.
 
 This is the implementation of `Controller` for the `MyController` struct.  All
 of the methods in the `Controller` trait have defaults that return 404.  Lets
-implement the `post` method for `MyController` so that it returns a 200 instead.
+implement the `post` method for `MyController` so that it returns a 200 instead
 
 .. code-block:: rust
 
@@ -56,4 +56,28 @@ implement the `post` method for `MyController` so that it returns a 200 instead.
       }
    }
 
+Ok! There is a lot going on here, lets break it down
+
+.. code-block:: rust
+
+   impl Controller for MyController {
+      // We are implementing the `post` method, meaning POST requests to this
+      // controller will use our `post` implementation
+      fn post<'a>(
+          // Self is an Arc<Self>, meaning that you can only use controller
+          methods when your controller is an Arc<dyn Controller>.  
+          self: Arc<Self>,
+          // The request with its body as a series of bytes
+          _req: Request<&'a [u8]>,
+          // The params parsed out of the uri such as /:version/
+          _params: HashMap<String, String>,
+      // The return type is a Future that outputs a Result<Response<Vec<u8>>>
+      ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
+          // Create a Future
+          Box::pin(async move {
+            // Return a Result<Response<Vec<u8>>> by passing a 200 Response to the serialize function
+            Ok(serialize(Response::builder().status(200).body(())?)?)
+          })
+      }
+    }
    
