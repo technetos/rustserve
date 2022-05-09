@@ -103,6 +103,7 @@ handled in our post implementation.
 Whew! Again there is a lot going on, lets break it down
 
 .. code-block:: rust
+
    impl HttpError for MyController {
       // We are implementing the `internal_server_error` method, this means when
       // internal_server_error is called on this controller, it will use our
