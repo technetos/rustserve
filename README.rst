@@ -128,4 +128,40 @@ Whew! Again there is a lot going on, lets break it down
       }
    }
 
+So whats going on here? We implemented the `post` method, that seems to make
+sense, but I'm never calling `internal_server_error`, why is it necessary? 
 
+That's a great question.  Various kinds of errors can occur in your web server,
+sometimes something is broken or wrong resulting in a 500 or a request is
+malformed and results in a 400, all of these errors are represented by the
+`HttpError` trait.  The idea is that when something goes wrong in your
+controller, your controllers error handler defines what happens.  
+
+With that in mind, lets re-examine the `post` method implementation
+
+.. code-block:: rust
+
+
+   impl Controller for MyController {
+      fn post<'a>(
+          self: Arc<Self>,
+          _req: Request<&'a [u8]>,
+          _params: HashMap<String, String>,
+      // The return type is a Future that outputs a Result<Response<Vec<u8>>>
+      ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
+          Box::pin(async move {
+            Ok(serialize(Response::builder().status(200).body(())?)?)
+      //    ^                                                    ^ ^
+      //    |                                                    | |
+      //    |                                                    | |
+      //
+      //    You can see that we are returning Ok and that we are making use of
+      //    the ? operator to handle errors that occur when building the
+      //    Response and when serializing the Response body.  
+      //
+      //    The errors returned by `?` in your controller methods are handled by
+      //    your controllers `internal_server_error` method.  
+      
+          })
+      }
+    }
