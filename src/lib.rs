@@ -361,19 +361,25 @@ pub async fn route_request<'a>(
     let res = if let Some(route) = routes.iter().find(|route| **route == RawRoute::new(path)) {
         let params = route.extract_params(path);
         let controller = route.controller.clone();
-        match method {
-            "GET" => controller.get(req, params),
-            "HEAD" => controller.head(req, params),
-            "POST" => controller.post(req, params),
-            "PUT" => controller.put(req, params),
-            "DELETE" => controller.delete(req, params),
-            "CONNECT" => controller.connect(req, params),
-            "OPTIONS" => controller.options(req, params),
-            "TRACE" => controller.trace(req, params),
-            "PATCH" => controller.patch(req, params),
-            _ => controller.bad_request(anyhow::Error::msg("unsupported HTTP method")),
+        let res = match method {
+            "GET" => controller.clone().get(req, params),
+            "HEAD" => controller.clone().head(req, params),
+            "POST" => controller.clone().post(req, params),
+            "PUT" => controller.clone().put(req, params),
+            "DELETE" => controller.clone().delete(req, params),
+            "CONNECT" => controller.clone().connect(req, params),
+            "OPTIONS" => controller.clone().options(req, params),
+            "TRACE" => controller.clone().trace(req, params),
+            "PATCH" => controller.clone().patch(req, params),
+            _ => controller.clone().bad_request(anyhow::Error::msg("unsupported HTTP method")),
         }
-        .await
+        .await;
+
+        if let Err(e) = res {
+            Ok(controller.clone().internal_server_error(e).await?)
+        } else {
+            res
+        }
     } else {
         not_found().await
     };
