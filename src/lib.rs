@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+
 // ----------------------------
 // Errors
 
@@ -13,7 +14,7 @@ macro_rules! generate_http_error_method {
     ($error_name:ident) => {
         fn $error_name(
             self: Arc<Self>,
-            _: anyhow::Error,
+            _: Option<anyhow::Error>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
             Box::pin($error_name())
         }
@@ -57,6 +58,13 @@ async fn internal_server_error() -> anyhow::Result<Response<Vec<u8>>> {
 }
 
 // ----------------------------
+// Entity
+
+pub trait Entity: HttpError + Send + Sync {
+    fn prefix(self: Arc<Self>) -> String;
+}
+
+// ----------------------------
 // Controllers
 
 macro_rules! generate_http_method {
@@ -66,7 +74,7 @@ macro_rules! generate_http_method {
             _: Request<&'a [u8]>,
             _: HashMap<String, String>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-            self.not_found(anyhow::Error::msg(""))
+            self.not_found(None)
         }
     };
 }
@@ -78,7 +86,7 @@ macro_rules! generate_http_method {
 /// you dont have to implement any of them.  If you dont implement a method, then requests on that
 /// route to that method return a 404, its not there, you didnt implement it.  By implementing a
 /// controller method, requests with that HTTP method will be routed to your implementation.  
-pub trait Controller: HttpError + Send + Sync {
+pub trait Controller: Entity + Send + Sync {
     generate_http_method!(get);
     generate_http_method!(head);
     generate_http_method!(post);
@@ -151,9 +159,7 @@ pub trait Guard: Send + Sync {
         self: Arc<Self>,
         req: Request<&'a [u8]>,
         params: HashMap<String, String>,
-        // using experimental feature trait_upcasting to enforce contract and prevent guards from
-        // interacting with the controller in anyway other than error methods
-        error: Arc<dyn HttpError>,
+        entity: Arc<dyn Entity>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>>;
 }
 
@@ -181,7 +187,11 @@ macro_rules! evaluate_guards_then_delegate_to_inner_controller {
                 for guard in self.clone().guards.iter() {
                     match guard
                         .clone()
-                        .verify(req, params, self.controller.clone())
+                        .verify(
+                            req,
+                            params,
+                            self.controller.clone(),
+                        )
                         .await
                     {
                         Ok(Outcome::Forward(forwarded_req, forwarded_params)) => {
@@ -194,7 +204,7 @@ macro_rules! evaluate_guards_then_delegate_to_inner_controller {
                             return self
                                 .controller
                                 .clone()
-                                .internal_server_error(e.into())
+                                .internal_server_error(Some(e.into()))
                                 .await
                         }
                     }
@@ -207,6 +217,12 @@ macro_rules! evaluate_guards_then_delegate_to_inner_controller {
             })
         }
     };
+}
+
+impl Entity for Protect {
+    fn prefix(self: Arc<Self>) -> String {
+        self.controller.clone().prefix()
+    }
 }
 
 impl Controller for Protect {
@@ -225,7 +241,7 @@ macro_rules! delegate_to_inner_http_error_method {
     ($error_name:ident) => {
         fn $error_name(
             self: Arc<Self>,
-            e: anyhow::Error,
+            e: Option<anyhow::Error>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
             self.controller.clone().$error_name(e)
         }
@@ -268,7 +284,7 @@ impl Route {
     pub fn new(s: impl Into<String>, controller: Arc<dyn Controller>) -> Self {
         let input = s.into();
 
-        let (static_segments_vec, dynamic_segments_vec) = input
+        let (dynamic_segments_vec, static_segments_vec) = input
             .split("/")
             .filter(|s| s.len() > 0)
             .enumerate()
@@ -371,12 +387,14 @@ pub async fn route_request<'a>(
             "OPTIONS" => controller.clone().options(req, params),
             "TRACE" => controller.clone().trace(req, params),
             "PATCH" => controller.clone().patch(req, params),
-            _ => controller.clone().bad_request(anyhow::Error::msg("unsupported HTTP method")),
+            _ => controller
+                .clone()
+                .bad_request(anyhow::Error::msg("unsupported HTTP method").into()),
         }
         .await;
 
         if let Err(e) = res {
-            Ok(controller.clone().internal_server_error(e).await?)
+            Ok(controller.clone().internal_server_error(e.into()).await?)
         } else {
             res
         }
