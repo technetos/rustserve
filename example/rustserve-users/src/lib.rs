@@ -1,9 +1,7 @@
+use rustserve::entity::{Create, Entity, Read, Update};
+use rustserve::error::{ErrorHandler, ErrorHandlerDefault};
+use rustserve::protection::{Guard, Outcome};
 use rustserve::Controller;
-use rustserve::Entity;
-use rustserve::ErrorHandler;
-use rustserve::Guard;
-use rustserve::Outcome;
-use rustserve::{Create, Read, Update};
 
 use http::{Request, Response};
 
@@ -60,7 +58,7 @@ impl Entity for MyController {}
 
 impl ErrorHandler for MyController {}
 
-impl rustserve::ErrorHandlerDefault for MyController {}
+impl ErrorHandlerDefault for MyController {}
 
 impl Controller for MyController {
     fn get<'a>(
@@ -152,7 +150,7 @@ impl<'a> Update<'a> for MyController {
 
 #[test]
 fn test() {
-    use rustserve::Protect;
+    use rustserve::protection::Protect;
     use rustserve::Route;
     use tracing::Level;
 
@@ -230,5 +228,15 @@ fn test() {
         let res = futures::executor::block_on(rustserve::route_request(req, &routes)).unwrap();
         assert!(res.status() == 400);
         assert!(res.body() == b"\"POST does not accept an id\"");
+
+        let body = serde_json::to_vec("test").unwrap();
+        let req = Request::builder()
+            .uri("/1/resource")
+            .method("PUT")
+            .body(&body[..])
+            .unwrap();
+        let res = futures::executor::block_on(rustserve::route_request(req, &routes)).unwrap();
+        assert!(res.status() == 404);
+        assert!(res.body() == b"\"PUT requires an id\"");
     });
 }
