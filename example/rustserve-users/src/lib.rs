@@ -1,6 +1,6 @@
-use rustserve::entity::{Create, Entity, Read, Update};
-use rustserve::error::{ErrorHandler, ErrorHandlerDefault};
-use rustserve::protection::{Guard, Outcome};
+use rustserve::base::{Base, Create, Read, RequestFormatter, ResponseFormatter, Update};
+use rustserve::error::{ErrorHandler, HttpErrorDefault};
+use rustserve::safety::{RequestGuard, RequestGuardOutcome};
 use rustserve::Controller;
 
 use http::{Request, Response};
@@ -12,53 +12,38 @@ use std::sync::Arc;
 
 struct HttpGuard {}
 
-impl Guard for HttpGuard {
+impl RequestGuard for HttpGuard {
     fn verify<'a>(
         self: Arc<Self>,
         req: Request<&'a [u8]>,
         params: HashMap<String, String>,
-        entity: Arc<dyn Entity>,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>> {
+        base: Arc<dyn Base>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<RequestGuardOutcome<'a>>> + Send + 'a>> {
         Box::pin(async move {
-            let has_entity_id = params.contains_key(&entity.clone().prefix());
+            let has_id = params.contains_key(&base.clone().prefix());
 
             match req.method().as_str() {
-                "PUT" if !has_entity_id => Ok(Outcome::Respond(
-                    entity
-                        .not_found(anyhow::Error::msg("PUT requires an id").into())
+                "PUT" if !has_id => Ok(RequestGuardOutcome::Respond(
+                    base.not_found(anyhow::Error::msg("PUT requires an id").into())
                         .await?,
                 )),
-                "POST" if has_entity_id => Ok(Outcome::Respond(
-                    entity
-                        .bad_request(anyhow::Error::msg("POST does not accept an id").into())
+                "POST" if has_id => Ok(RequestGuardOutcome::Respond(
+                    base.bad_request(anyhow::Error::msg("POST does not accept an id").into())
                         .await?,
                 )),
-                _ => Ok(Outcome::Forward(req, params)),
+                _ => Ok(RequestGuardOutcome::Forward(req, params)),
             }
         })
     }
 }
 
-pub fn extract_query_params(query: &str) -> HashMap<String, String> {
-    let mut hash_map = HashMap::new();
-
-    query.split("&").for_each(|param| {
-        let key_value = param.split("=").collect::<Vec<_>>();
-        if key_value.len() == 2 {
-            hash_map.insert(key_value[0].into(), key_value[1].into());
-        }
-    });
-
-    hash_map
-}
-
 struct MyController {}
 
-impl Entity for MyController {}
+impl Base for MyController {}
 
 impl ErrorHandler for MyController {}
 
-impl ErrorHandlerDefault for MyController {}
+impl HttpErrorDefault for MyController {}
 
 impl Controller for MyController {
     fn get<'a>(
@@ -66,7 +51,15 @@ impl Controller for MyController {
         req: Request<&'a [u8]>,
         params: HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-        self.handle_get_request(req, params)
+        Box::pin(async move {
+            Ok(if params.get(&self.clone().prefix()).is_some() {
+                let res: Response<ReadResponse> = self.clone().read(req, params).await?;
+                self.clone().serialize(res).await?
+            } else {
+                let res: Response<Vec<ReadResponse>> = self.clone().read(req, params).await?;
+                self.clone().serialize(res).await?
+            })
+        })
     }
 
     fn post<'a>(
@@ -86,60 +79,91 @@ impl Controller for MyController {
     }
 }
 
-impl<'a> Read<'a> for MyController {
-    type Res = String;
+impl<'a> RequestFormatter<'a, String> for MyController {}
+impl<'a> ResponseFormatter<'a, String> for MyController {}
 
-    fn get_one(
+#[derive(serde::Serialize)]
+pub struct ReadResponse {
+    msg: String,
+}
+
+impl<'a> ResponseFormatter<'a, ReadResponse> for MyController {}
+impl<'a> ResponseFormatter<'a, Vec<ReadResponse>> for MyController {}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct CreateRequest {
+    msg: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct CreateResponse {
+    msg: String,
+}
+
+impl<'a> RequestFormatter<'a, CreateRequest> for MyController {}
+impl<'a> ResponseFormatter<'a, CreateResponse> for MyController {}
+
+impl<'a> Read<'a, ReadResponse> for MyController {
+    fn read(
         self: Arc<Self>,
         _req: Request<&'a [u8]>,
         _params: HashMap<String, String>,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Self::Res>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<ReadResponse>>> + Send + 'a>> {
         Box::pin(async move {
-            Ok(Response::builder()
-                .status(200)
-                .body(String::from("get_one response"))?)
-        })
-    }
-
-    fn get_many(
-        self: Arc<Self>,
-        _req: Request<&'a [u8]>,
-        _params: HashMap<String, String>,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<Self::Res>>>> + Send + 'a>> {
-        Box::pin(async move {
-            Ok(Response::builder()
-                .status(200)
-                .body(vec![String::from("get_many"), String::from("response")])?)
+            Ok(Response::builder().status(200).body(ReadResponse {
+                msg: String::from("read one response"),
+            })?)
         })
     }
 }
 
-impl<'a> Create<'a> for MyController {
-    type Req = String;
-    type Res = String;
+impl<'a> Read<'a, Vec<ReadResponse>> for MyController {
+    fn read(
+        self: Arc<Self>,
+        _req: Request<&'a [u8]>,
+        _params: HashMap<String, String>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<ReadResponse>>>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Ok(Response::builder().status(200).body(vec![
+                ReadResponse {
+                    msg: String::from("read many"),
+                },
+                ReadResponse {
+                    msg: String::from("response"),
+                },
+            ])?)
+        })
+    }
+}
 
+impl<'a> Create<'a, CreateRequest, CreateResponse> for MyController {
     fn create(
         self: Arc<Self>,
-        _req: Request<Self::Req>,
+        req: Request<CreateRequest>,
         _params: HashMap<String, String>,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Self::Res>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<CreateResponse>>> + Send + 'a>> {
         Box::pin(async move {
-            Ok(Response::builder()
-                .status(200)
-                .body(String::from("create response"))?)
+            let query_params = req
+                .uri()
+                .query()
+                .map(|query| self.extract_query_params(query))
+                .unwrap_or(HashMap::new());
+
+            dbg!(query_params);
+            Ok(Response::builder().status(200).body(CreateResponse {
+                msg: String::from("create response"),
+            })?)
         })
     }
 }
 
-impl<'a> Update<'a> for MyController {
-    type Req = String;
-    type Res = String;
-
+impl<'a> Update<'a, String, String> for MyController {
     fn update(
         self: Arc<Self>,
-        _req: Request<Self::Req>,
+        _req: Request<String>,
         _params: HashMap<String, String>,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Self::Res>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<String>>> + Send + 'a>> {
         Box::pin(async move {
             Ok(Response::builder()
                 .status(200)
@@ -150,7 +174,7 @@ impl<'a> Update<'a> for MyController {
 
 #[test]
 fn test() {
-    use rustserve::protection::Protect;
+    use rustserve::safety::Protect;
     use rustserve::Route;
     use tracing::Level;
 
@@ -167,7 +191,8 @@ fn test() {
 
     let my_controller = Arc::new(Protect {
         controller: my_controller.clone(),
-        guards: vec![http_guard.clone()],
+        request_guards: vec![http_guard.clone()],
+        response_guards: vec![],
     });
 
     let routes = vec![
@@ -178,36 +203,36 @@ fn test() {
         ),
     ];
 
-    let body_bytes = vec![];
-
     tracing::subscriber::with_default(subscriber, || {
+        let body = vec![];
         let req = Request::builder()
             .uri("/1/resource/")
             .method("GET")
-            .body(&body_bytes[..])
+            .body(&body[..])
             .unwrap();
         let res = futures::executor::block_on(rustserve::route_request(req, &routes)).unwrap();
         assert!(res.status() == 200);
-        assert!(res.body() == b"[\"get_many\",\"response\"]");
+        assert!(res.body() == b"[{\"msg\":\"read many\"},{\"msg\":\"response\"}]");
 
+        let body = vec![];
         let req = Request::builder()
             .uri("/1/resource/1")
             .method("GET")
-            .body(&body_bytes[..])
+            .body(&body[..])
             .unwrap();
         let res = futures::executor::block_on(rustserve::route_request(req, &routes)).unwrap();
         assert!(res.status() == 200);
-        assert!(res.body() == b"\"get_one response\"");
+        assert!(res.body() == b"{\"msg\":\"read one response\"}");
 
-        let body = serde_json::to_vec("test").unwrap();
+        let body = serde_json::to_vec(&CreateRequest { msg: "test".into() }).unwrap();
         let req = Request::builder()
-            .uri("/1/resource")
+            .uri("/1/resource?a=1")
             .method("POST")
             .body(&body[..])
             .unwrap();
         let res = futures::executor::block_on(rustserve::route_request(req, &routes)).unwrap();
         assert!(res.status() == 200);
-        assert!(res.body() == b"\"create response\"");
+        assert!(res.body() == b"{\"msg\":\"create response\"}");
 
         let body = serde_json::to_vec("test").unwrap();
         let req = Request::builder()

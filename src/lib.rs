@@ -36,7 +36,7 @@ pub mod error {
     ///
     /// Manually implementing the `HttpError` trait
     ///
-    /// Only `not_found` is implemented, the rest are early the same thing.  
+    /// Only `not_found` is implemented, the rest are nearly the same thing.  
     ///
     /// ```rust
     /// struct MyController {}
@@ -65,7 +65,7 @@ pub mod error {
     ///
     /// If you implement `ErrorHandler` and `HttpError` you can override any of the error methods as well
     /// as customize the calling of `handle_error`.  If you want to use the default error handler
-    /// then you just have to implement the marker trait `ErrorHandlerDefault` and `ErrorHandler`.
+    /// then you just have to implement the marker trait `HttpErrorDefault` and `ErrorHandler`.
     /// Lastly if you don't want to use `ErrorHandler` at all then you can simply implement `HttpError`
     /// and return any responses you want.  
     ///
@@ -76,16 +76,16 @@ pub mod error {
     /// ```rust
     /// struct MyController {}
     ///
-    /// impl Entity for MyController {}
+    /// impl Base for MyController {}
     /// impl ErrorHandler for MyController {}
-    /// impl ErrorHandlerDefault for MyController {}
+    /// impl HttpErrorDefault for MyController {}
     /// ```
     ///
-    pub trait ErrorHandlerDefault {}
+    pub trait HttpErrorDefault {}
 
     impl<T> HttpError for T
     where
-        T: ErrorHandler + ErrorHandlerDefault,
+        T: ErrorHandler + HttpErrorDefault,
     {
         fn not_found(
             self: Arc<Self>,
@@ -118,7 +118,6 @@ pub mod error {
 
     /// Process error messages before they are sent to the client
     ///
-    /// When using the default error implementation, `handle_error` is called by every error method.
     /// The default implementation of `handle_error` logs the error and sends an HTTP error response to
     /// the client.  
     ///
@@ -129,7 +128,7 @@ pub mod error {
     /// ```rust
     /// struct MyController {}
     ///
-    /// impl Entity for MyController {}
+    /// impl Base for MyController {}
     /// impl ErrorHandler for MyController {}
     /// impl HttpError for MyController {
     ///    fn not_found(
@@ -141,7 +140,7 @@ pub mod error {
     /// }
     /// ```
     ///
-    pub trait ErrorHandler: entity::Entity + 'static {
+    pub trait ErrorHandler: base::Base + 'static {
         fn handle_error(
             self: Arc<Self>,
             code: u16,
@@ -151,10 +150,8 @@ pub mod error {
                 let builder = Response::builder().status(code);
 
                 if let Some(err) = e {
-                    warn!("{code}: {err}");
                     Ok(builder.body(serde_json::to_vec(&format!("{err}"))?)?)
                 } else {
-                    warn!("{code}");
                     Ok(builder.body(vec![])?)
                 }
             })
@@ -184,7 +181,7 @@ macro_rules! generate_http_method {
 /// you don't have to implement any of them.  If you don't implement a method, then requests on that
 /// route to that method return a 404, its not there, you didn't implement it.  By implementing a
 /// controller method, requests with that HTTP method will be routed to your implementation.  
-pub trait Controller: entity::Entity + Send + Sync {
+pub trait Controller: base::Base {
     generate_http_method!(get);
     generate_http_method!(head);
     generate_http_method!(delete);
@@ -197,7 +194,7 @@ pub trait Controller: entity::Entity + Send + Sync {
 // ----------------------------
 // Guards
 
-pub mod protection {
+pub mod safety {
     use super::*;
 
     /// The output of a guard verifying a request.
@@ -210,8 +207,13 @@ pub mod protection {
     ///    until all guards have verified the request.  Finally the request is passed to the controller
     ///    by calling the corresponding `http` method.
     /// + `Respond` returns an `http::Response<Vec<u8>>` immediately back to the client.
-    pub enum Outcome<'a> {
+    pub enum RequestGuardOutcome<'a> {
         Forward(Request<&'a [u8]>, HashMap<String, String>),
+        Respond(Response<Vec<u8>>),
+    }
+
+    pub enum ResponseGuardOutcome {
+        Forward(Response<Vec<u8>>),
         Respond(Response<Vec<u8>>),
     }
 
@@ -220,13 +222,23 @@ pub mod protection {
     /// Guards are used by `Protect` to `verify` that a request meets a specific criteria.  Guards are
     /// evaluated in a short circut fashion, each guard returns an `Outcome` that can either `Forward`
     /// the request or `Respond` immediately.  
-    pub trait Guard: Send + Sync {
+    pub trait RequestGuard: Send + Sync {
         fn verify<'a>(
             self: Arc<Self>,
             req: Request<&'a [u8]>,
             params: HashMap<String, String>,
-            entity: Arc<dyn entity::Entity>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Outcome<'a>>> + Send + 'a>>;
+            base: Arc<dyn base::Base>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<RequestGuardOutcome<'a>>> + Send + 'a>>;
+    }
+
+    pub trait ResponseGuard: Send + Sync {
+        fn apply<'a>(
+            self: Arc<Self>,
+            req: Request<&'a [u8]>,
+            res: Response<Vec<u8>>,
+            params: HashMap<String, String>,
+            base: Arc<dyn base::Base>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<ResponseGuardOutcome>> + Send + 'a>>;
     }
 
     /// A wrapper around a `Controller` that evaluates its `Guards` before delegating to the inner
@@ -236,7 +248,8 @@ pub mod protection {
     /// `Guards`.  When a request is routed to a _protected_ `Controller` the series of `Guards`
     /// evaluate the request in a short circuit fashion before delegating to the inner controller.  
     pub struct Protect {
-        pub guards: Vec<Arc<dyn Guard>>,
+        pub request_guards: Vec<Arc<dyn RequestGuard>>,
+        pub response_guards: Vec<Arc<dyn ResponseGuard>>,
         pub controller: Arc<dyn Controller>,
     }
 
@@ -250,38 +263,44 @@ pub mod protection {
                 Box::pin(async move {
                     let mut req = request;
                     let mut params = parameters;
-                    for guard in self.clone().guards.iter() {
+                    for guard in self.clone().request_guards.iter() {
                         match guard
                             .clone()
                             .verify(req, params, self.controller.clone())
-                            .await
+                            .await?
                         {
-                            Ok(Outcome::Forward(forwarded_req, forwarded_params)) => {
+                            RequestGuardOutcome::Forward(forwarded_req, forwarded_params) => {
                                 req = forwarded_req;
                                 params = forwarded_params;
                                 continue;
                             }
-                            Ok(Outcome::Respond(res)) => return Ok(res),
-                            Err(e) => {
-                                return self
-                                    .controller
-                                    .clone()
-                                    .internal_server_error(Some(e.into()))
-                                    .await
-                            }
+                            RequestGuardOutcome::Respond(res) => return Ok(res),
                         }
                     }
 
-                    self.controller
+                    let res = self
+                        .controller
                         .clone()
                         .$controller_method(req, params)
-                        .await
+                        .await?;
+
+                    //for guard in self.clone().response_guards.iter() {
+                    //    match guard.clone().apply(request, res, params, self.controller.clone()).await? {
+                    //        ResponseGuardOutcome::Forward(forwarded_res) => {
+                    //            res = forwarded_res;
+                    //            continue;
+                    //        },
+                    //        ResponseGuardOutcome::Respond(res) => return Ok(res),
+                    //    }
+                    //}
+
+                    Ok(res)
                 })
             }
         };
     }
 
-    impl entity::Entity for Protect {
+    impl base::Base for Protect {
         fn prefix(self: Arc<Self>) -> String {
             self.controller.clone().prefix()
         }
@@ -313,6 +332,24 @@ pub mod protection {
         delegate_to_inner_http_error_method!(bad_request);
         delegate_to_inner_http_error_method!(unauthorized);
         delegate_to_inner_http_error_method!(internal_server_error);
+    }
+}
+
+// ----------------------------
+// Data source abstraction
+
+pub mod query {
+    use super::*;
+
+    /// A storage trait for services
+    ///
+    /// Implement this trait to query your services through.  Can be implemented multiple times
+    /// with different `Req` and `Res` types.  
+    pub trait Store<Req, Res>: base::Base {
+        fn query(
+            self: Arc<Self>,
+            req: Req,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Res>> + Send>>;
     }
 }
 
@@ -435,8 +472,9 @@ pub async fn route_request<'a>(
     let method = req.method().as_str();
     let path = req.uri().path();
 
+    let req_method_path = format!("{method} {path}");
+
     let res = if let Some(route) = routes.iter().find(|route| **route == RawRoute::new(path)) {
-        info!("{method} {path}");
         let params = route.extract_params(path);
         let controller = route.controller.clone();
         let res = match method {
@@ -460,55 +498,93 @@ pub async fn route_request<'a>(
         }
     } else {
         Ok(Response::builder().status(404).body(vec![])?)
-    };
+    }?;
 
-    Ok(res?)
+    let res_status = res.status();
+    let diagnostic_str = format!("{req_method_path} => {res_status}");
+    match res_status.as_u16() {
+        500..=599 => error!("{diagnostic_str}"),
+        400..=499 => warn!("{diagnostic_str}"),
+        100..=399 => info!("{diagnostic_str}"),
+        _ => error!("{diagnostic_str}"),
+    }
+
+    Ok(res)
 }
 
 // ----------------------------
-// Entity
+// Base
 
-pub mod entity {
+pub mod base {
     use super::*;
 
-    /// A `Controller` super type
+    /// The trait that ties the whole framework together.
     ///
-    /// `Entity` is the trait that ties the whole framework together.
-    ///
-    /// - `Entity` implements `HttpError`,
-    ///   - `Controller` implements `Entity`
-    ///   - `Create`, `Read`, `Update` and `Delete` implement `Entity`
+    /// - `Base` implements `HttpError`,
+    ///   - `Controller` implements `Base`
+    ///   - `Create`, `Read`, `Update` and `Delete` implement `Base`
     ///
     /// This hierarchy means that for a single struct implementing all the traits above
     ///
-    /// - `Controllers` have access to methods in `Entity` and `HttpError`
-    /// - `Create`, `Read`, `Update` and `Delete` have access to methods in `Entity` and `HttpError`
+    /// - `Controllers` have access to methods in `Base` and `HttpError` in default
+    ///   implementations.
+    /// - `Create`, `Read`, `Update` and `Delete` have access to methods in `Base` and
+    ///   `HttpError` in default implementations.
     ///
     /// Since a single struct is implementing all the traits above
     ///
-    /// - `Controller` methods can delegate to methods on `Create`, `Read`, `Update` and `Delete`
+    /// - Overridden `Controller` methods can delegate to methods on `Create`, `Read`, `Update` and
+    ///   `Delete`
     ///
     /// Finally, all the traits above have access to `self`, meaning they all have access to any state
     /// stored in the implementing struct.  
-    pub trait Entity: error::HttpError + Send + Sync {
+    pub trait Base: error::HttpError + Send + Sync {
+        /// Resources are identified by IDs.  When querying for a resource through an API the `:id`
+        /// parameter usually signifies the singular resource in question.  The `prefix` method can
+        /// be overridden to set a different prefix to `:id` such as `:resource_id` where `id` is
+        /// prefixed by `resource`. This parameter ultimately ends up in the `params` HashMap that
+        /// you have access to in the controller, CRUD, and Guard methods.  
         fn prefix(self: Arc<Self>) -> String {
             "id".into()
         }
+
+        fn extract_query_params(self: Arc<Self>, query: &str) -> HashMap<String, String> {
+            let mut hash_map = HashMap::new();
+
+            query.split("&").for_each(|param| {
+                let key_value = param.split("=").collect::<Vec<_>>();
+                if key_value.len() == 2 {
+                    hash_map.insert(key_value[0].into(), key_value[1].into());
+                }
+            });
+
+            hash_map
+        }
     }
 
-    pub trait Create<'a>: Entity + 'a {
-        type Req: for<'de> serde::Deserialize<'de> + Send + 'a;
-        type Res: serde::Serialize + Send + 'a;
-
-        fn create(
+    pub trait RequestFormatter<'a, Payload>: Base + Send + 'a
+    where
+        Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
+    {
+        fn deserialize(
             self: Arc<Self>,
-            req: Request<Self::Req>,
-            params: HashMap<String, String>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Self::Res>>> + Send + 'a>>;
+            req: Request<&'a [u8]>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Request<Payload>>> + Send + 'a>> {
+            Box::pin(async move {
+                let (parts, bytes) = req.into_parts();
+                let body = serde_json::from_slice(&bytes)?;
+                Ok(Request::from_parts(parts, body))
+            })
+        }
+    }
 
+    pub trait ResponseFormatter<'a, Payload>: Base + Send + 'a
+    where
+        Payload: serde::Serialize + Send + 'a,
+    {
         fn serialize(
             self: Arc<Self>,
-            res: Response<Self::Res>,
+            res: Response<Payload>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
             Box::pin(async move {
                 let (parts, body) = res.into_parts();
@@ -516,17 +592,18 @@ pub mod entity {
                 Ok(Response::from_parts(parts, json_body_bytes))
             })
         }
+    }
 
-        fn deserialize(
+    pub trait Create<'a, Req, Res>: RequestFormatter<'a, Req> + ResponseFormatter<'a, Res>
+    where
+        Req: for<'de> serde::Deserialize<'de> + Send + 'a,
+        Res: serde::Serialize + Send + 'a,
+    {
+        fn create(
             self: Arc<Self>,
-            req: Request<&'a [u8]>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Request<Self::Req>>> + Send + 'a>> {
-            Box::pin(async move {
-                let (parts, bytes) = req.into_parts();
-                let body = serde_json::from_slice(&bytes)?;
-                Ok(Request::from_parts(parts, body))
-            })
-        }
+            req: Request<Req>,
+            params: HashMap<String, String>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Res>>> + Send + 'a>>;
 
         fn handle_post_request(
             self: Arc<Self>,
@@ -545,42 +622,15 @@ pub mod entity {
         }
     }
 
-    pub trait Read<'a>: Entity + 'a {
-        type Res: serde::Serialize + Send + 'a;
-
-        fn get_one(
+    pub trait Read<'a, Res>: ResponseFormatter<'a, Res>
+    where
+        Res: serde::Serialize + Send + 'a,
+    {
+        fn read(
             self: Arc<Self>,
             _req: Request<&'a [u8]>,
             _params: HashMap<String, String>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Self::Res>>> + Send + 'a>>;
-
-        fn get_many(
-            self: Arc<Self>,
-            _req: Request<&'a [u8]>,
-            _params: HashMap<String, String>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<Self::Res>>>> + Send + 'a>>;
-
-        fn serialize(
-            self: Arc<Self>,
-            res: Response<Self::Res>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-            Box::pin(async move {
-                let (parts, body) = res.into_parts();
-                let json_body_bytes = serde_json::to_vec(&body)?;
-                Ok(Response::from_parts(parts, json_body_bytes))
-            })
-        }
-
-        fn serialize_many(
-            self: Arc<Self>,
-            res: Response<Vec<Self::Res>>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-            Box::pin(async move {
-                let (parts, body) = res.into_parts();
-                let json_body_bytes = serde_json::to_vec(&body)?;
-                Ok(Response::from_parts(parts, json_body_bytes))
-            })
-        }
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Res>>> + Send + 'a>>;
 
         fn handle_get_request(
             self: Arc<Self>,
@@ -588,51 +638,23 @@ pub mod entity {
             params: HashMap<String, String>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
             Box::pin(async move {
-                let prefix = self.clone().prefix();
-                if params.contains_key(&prefix) {
-                    self.clone()
-                        .serialize(self.get_one(req, params).await?)
-                        .await
-                } else {
-                    self.clone()
-                        .serialize_many(self.get_many(req, params).await?)
-                        .await
-                }
+                self.clone()
+                    .serialize(self.read(req, params).await?)
+                    .await
             })
         }
     }
 
-    pub trait Update<'a>: Entity + 'a {
-        type Req: for<'de> serde::Deserialize<'de> + Send + 'a;
-        type Res: serde::Serialize + Send + 'a;
-
+    pub trait Update<'a, Req, Res>: RequestFormatter<'a, Req> + ResponseFormatter<'a, Res>
+    where
+        Req: for<'de> serde::Deserialize<'de> + Send + 'a,
+        Res: serde::Serialize + Send + 'a,
+    {
         fn update(
             self: Arc<Self>,
-            req: Request<Self::Req>,
+            req: Request<Req>,
             params: HashMap<String, String>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Self::Res>>> + Send + 'a>>;
-
-        fn serialize(
-            self: Arc<Self>,
-            res: Response<Self::Res>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
-            Box::pin(async move {
-                let (parts, body) = res.into_parts();
-                let json_body_bytes = serde_json::to_vec(&body)?;
-                Ok(Response::from_parts(parts, json_body_bytes))
-            })
-        }
-
-        fn deserialize(
-            self: Arc<Self>,
-            req: Request<&'a [u8]>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Request<Self::Req>>> + Send + 'a>> {
-            Box::pin(async move {
-                let (parts, bytes) = req.into_parts();
-                let body = serde_json::from_slice(&bytes)?;
-                Ok(Request::from_parts(parts, body))
-            })
-        }
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Res>>> + Send + 'a>>;
 
         fn handle_put_request(
             self: Arc<Self>,
