@@ -150,7 +150,7 @@ impl<'a> PartialEq<Route> for RawRoute {
 /// Route a request to a controller or return not found
 ///
 /// A function providing routing support.  Takes in a request and the routes and delegates to the
-/// controller associated to the route if a route exists.  
+/// controller associated to the route if the route exists.
 pub async fn route_request<'a>(
     req: Request<&'a [u8]>,
     routes: Arc<Vec<Route>>,
@@ -231,6 +231,10 @@ pub mod base {
         }
     }
 
+    /// Parse an incoming Request<&'a [u8]> into a Request<Payload>.
+    ///
+    /// Assumes JSON formatting, if you need other deserialization formats, implement the parse
+    /// method for your controller and payload type.
     pub trait Parse<'a, Payload>: Send + 'a
     where
         Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
@@ -247,10 +251,17 @@ pub mod base {
         }
     }
 
+    /// Convert a Response<Payload> into a Response<Vec<u8>>
+    ///
+    /// Assumes JSON body format, automatically adds Content-Type: application/json and
+    /// Content-Length headers.  If you need a different headers, implement the headers()
+    /// associated method.  If you need a different serialization format, implement the `reply`
+    /// method.
     pub trait Reply<'a, Payload>: Send + 'a
     where
         Payload: serde::Serialize + Send + 'a,
     {
+        /// Sets default headers on the Response before sending the Response to the client.
         fn headers() -> HashMap<String, String> {
             let mut hash_map = HashMap::new();
             hash_map.insert("content-type".into(), "application/json".into());
@@ -282,6 +293,14 @@ pub mod base {
         }
     }
 
+    /// Convert a Response<Error> into a Response<Vec<u8>>
+    ///
+    /// Basically the same thing as Reply but supports error codes.
+    ///
+    /// Assumes JSON body format, automatically adds Content-Type: application/json and
+    /// Content-Length headers.  If you need a different headers, implement the headers()
+    /// associated method.  If you need a different serialization format, implement the `error`
+    /// method.
     pub trait Error<'a, Payload, const CODE: u16>: Send + 'a
     where
         Payload: serde::Serialize + Send + 'a,
@@ -315,6 +334,7 @@ pub mod base {
         }
     }
 
+    /// Create a resource and return it to the client.
     pub trait Create<'a, Req, Res>: Parse<'a, Req> + Reply<'a, Res>
     where
         Req: for<'de> serde::Deserialize<'de> + Send + 'a,
@@ -327,6 +347,7 @@ pub mod base {
         ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
     }
 
+    /// Read many resources or a single resource by id and return the resource(s) to the client.
     pub trait Read<'a, Res>: IdParam + Reply<'a, Res>
     where
         Res: serde::Serialize + Send + 'a,
@@ -338,6 +359,7 @@ pub mod base {
         ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
     }
 
+    /// Update a resource by id and return the updated resource to the client.
     pub trait Update<'a, Req, Res>: IdParam + Parse<'a, Req> + Reply<'a, Res>
     where
         Req: for<'de> serde::Deserialize<'de> + Send + 'a,
@@ -350,6 +372,7 @@ pub mod base {
         ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
     }
 
+    /// Delete a resource by id and return the deleted resource to the client.
     pub trait Delete<'a, Res>: IdParam + Reply<'a, Res>
     where
         Res: serde::Serialize + Send + 'a,
