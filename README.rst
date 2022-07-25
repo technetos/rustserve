@@ -26,10 +26,6 @@ implementation can be found `here`. Lets implement a `Controller`.
 
    }
 
-   impl HttpError for MyController {
-
-   }
-
 That's it!  Lets go over some details about whats going on here.  
 
 .. code-block:: rust
@@ -51,7 +47,7 @@ implement the `post` method for `MyController` so that it returns a 200 instead
           _params: HashMap<String, String>,
       ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
           Box::pin(async move {
-            Ok(serialize(Response::builder().status(200).body(())?)?)
+            Ok(Response::builder().status(200).body(vec![])?)
           })
       }
    }
@@ -75,8 +71,8 @@ Ok! There is a lot going on here, lets break it down
       ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
           // Create a Future
           Box::pin(async move {
-            // Return a Result<Response<Vec<u8>>> by passing a 200 Response to the serialize function
-            Ok(serialize(Response::builder().status(200).body(())?)?)
+            // Return a Result<Response<Vec<u8>>>
+            Ok(Response::builder().status(200).body(vec![])?)
           })
       }
     }
@@ -87,57 +83,35 @@ handled in our post implementation.
 
 .. code-block:: rust
 
-   impl HttpError for MyController {
-      fn internal_server_error(
-          self: Arc<Self>,
-          e: anyhow::Error,
-      ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
-          Box::pin(async move {
-              Ok(serialize(
-                  Response::builder().status(500).body(format!("{e}"))?,
-              )?)
-          })
-      }
-   }
+   #[derive(serde::Deserialize)]
+   struct MyError;
+
+   impl<'a> Error<'a, MyError, 500> for MyController {}
 
 Whew! Again there is a lot going on, lets break it down
 
 .. code-block:: rust
 
-   impl HttpError for MyController {
-      // We are implementing the `internal_server_error` method, this means when
-      // internal_server_error is called on this controller, it will use our
-      // implementation.
-      fn internal_server_error(
-          // Self is an Arc<Self>, meaning that you can only use controller
-          // methods when your controller is an Arc<dyn HttpError>.   
-          self: Arc<Self>,
-          // The error that ocurred is passed as a parameter.  
-          e: anyhow::Error,
-      // The return type is a Future that outputs a Result<Response<Vec<u8>>>
-      ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send>> {
-          // Create a future
-          Box::pin(async move {
-              // Return a Result<Response<Vec<u8>>> by passing a 500 response to
-              // the serialize function.  We are also setting the body of the
-              // response to be the error we received as an argument.  
-              Ok(serialize(
-                  Response::builder().status(500).body(format!("{e}"))?,
-              )?)
-          })
-      }
-   }
+   // Derive serialize for the error message
+   #[derive(serde::Serialize)]
+   // The actual error message
+   struct MyError;
+
+   // Implementation of the Error trait parameterized with our message and the
+   // HTTP status code for the error.
+   impl<'a> Error<'a, MyError, 500> for MyController {}
 
 So whats going on here? We implemented the `post` method, that seems to make
-sense, but I'm never calling `internal_server_error`, why is it necessary? 
+sense, but we are never using `MyError`, why is it necessary? 
 
 That's a great question.  Various kinds of errors can occur in your web server,
 sometimes something is broken or wrong resulting in a 500 or a request is
-malformed and results in a 400, all of these errors are represented by the
-`HttpError` trait.  The idea is that when something goes wrong in your
-controller, your controllers error handler defines what happens.  
+malformed and results in a 400, all of these errors can be represented by the
+`Error<'a, T>` trait.  The idea is that when something goes wrong in your
+controller, your controller defines what happens on a per error basis.  
 
-With that in mind, lets re-examine the `post` method implementation
+With that in mind, lets re-implement the `post` method implementation to return
+an error.
 
 .. code-block:: rust
 
@@ -150,18 +124,7 @@ With that in mind, lets re-examine the `post` method implementation
       // The return type is a Future that outputs a Result<Response<Vec<u8>>>
       ) -> Pin<Box<dyn Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'a>> {
           Box::pin(async move {
-            Ok(serialize(Response::builder().status(200).body(())?)?)
-      //    ^                                                    ^ ^
-      //    |                                                    | |
-      //    |                                                    | |
-      //
-      //    You can see that we are returning Ok and that we are making use of
-      //    the ? operator to handle errors that occur when building the
-      //    Response and when serializing the Response body.  
-      //
-      //    The errors returned by `?` in your controller methods are handled by
-      //    your controllers `internal_server_error` method.  
-      
+              self.error(MyError).await
           })
       }
     }

@@ -205,182 +205,178 @@ pub async fn route_request<'a>(
     Ok(res)
 }
 
-// ----------------------------
-// Base
-
-pub mod base {
-    use super::*;
-
-    pub trait IdParam {
-        fn id(self: Arc<Self>) -> String {
-            "id".into()
-        }
+/// Parameter name in the URI for identifying the resource.  Defaults to `id`.
+///
+/// If you want to change the id field name for a resource, simply implement the `id` method.
+pub trait IdParam {
+    fn id(self: Arc<Self>) -> String {
+        "id".into()
     }
+}
 
-    pub trait QueryParams {
-        fn extract_query_params(self: Arc<Self>, query: Option<&str>) -> HashMap<String, String> {
-            query.iter().fold(HashMap::new(), |mut hash_map, query| {
-                query.split("&").for_each(|param| {
-                    let key_value = param.split("=").collect::<Vec<_>>();
-                    if key_value.len() == 2 {
-                        hash_map.insert(key_value[0].into(), key_value[1].into());
-                    }
-                });
-                hash_map
-            })
-        }
-    }
-
-    /// Parse an incoming Request<&'a [u8]> into a Request<Payload>.
-    ///
-    /// Assumes JSON formatting, if you need other deserialization formats, implement the parse
-    /// method for your controller and payload type.
-    pub trait Parse<'a, Payload>: Send + 'a
-    where
-        Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
-    {
-        fn parse(
-            self: Arc<Self>,
-            req: Request<&'a [u8]>,
-        ) -> BoxFuture<'a, anyhow::Result<Request<Payload>>> {
-            Box::pin(async move {
-                let (parts, bytes) = req.into_parts();
-                let body = serde_json::from_slice(&bytes)?;
-                Ok(Request::from_parts(parts, body))
-            })
-        }
-    }
-
-    /// Convert a Response<Payload> into a Response<Vec<u8>>
-    ///
-    /// Assumes JSON body format, automatically adds Content-Type: application/json and
-    /// Content-Length headers.  If you need a different headers, implement the headers()
-    /// associated method.  If you need a different serialization format, implement the `reply`
-    /// method.
-    pub trait Reply<'a, Payload>: Send + 'a
-    where
-        Payload: serde::Serialize + Send + 'a,
-    {
-        /// Sets default headers on the Response before sending the Response to the client.
-        fn headers() -> HashMap<String, String> {
-            let mut hash_map = HashMap::new();
-            hash_map.insert("content-type".into(), "application/json".into());
-            hash_map
-        }
-
-        fn reply(
-            self: Arc<Self>,
-            body: Payload,
-        ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
-            Box::pin(async move {
-                let mut builder = Response::builder().status(200);
-
-                let body_bytes = serde_json::to_vec(&body)?;
-
-                let headers_mut = builder.headers_mut().unwrap();
-                {
-                    for (k, v) in Self::headers() {
-                        headers_mut.insert(
-                            HeaderName::from_bytes(k.as_bytes())?,
-                            HeaderValue::from_str(&v)?,
-                        );
-                    }
-                    headers_mut.insert("content-length", HeaderValue::from(body_bytes.len()));
+pub trait QueryParams {
+    fn extract_query_params(self: Arc<Self>, query: Option<&str>) -> HashMap<String, String> {
+        query.iter().fold(HashMap::new(), |mut hash_map, query| {
+            query.split("&").for_each(|param| {
+                let key_value = param.split("=").collect::<Vec<_>>();
+                if key_value.len() == 2 {
+                    hash_map.insert(key_value[0].into(), key_value[1].into());
                 }
-
-                Ok(builder.body(body_bytes)?)
-            })
-        }
-    }
-
-    /// Convert a Response<Error> into a Response<Vec<u8>>
-    ///
-    /// Basically the same thing as Reply but supports error codes.
-    ///
-    /// Assumes JSON body format, automatically adds Content-Type: application/json and
-    /// Content-Length headers.  If you need a different headers, implement the headers()
-    /// associated method.  If you need a different serialization format, implement the `error`
-    /// method.
-    pub trait Error<'a, Payload, const CODE: u16>: Send + 'a
-    where
-        Payload: serde::Serialize + Send + 'a,
-    {
-        fn headers() -> HashMap<String, String> {
-            let mut hash_map = HashMap::new();
-            hash_map.insert("content-type".into(), "application/json".into());
+            });
             hash_map
-        }
+        })
+    }
+}
 
-        fn error(
-            self: Arc<Self>,
-            body: Payload,
-        ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
-            Box::pin(async move {
-                let mut builder = Response::builder().status(CODE);
+/// Parse an incoming Request<&'a [u8]> into a Request<Payload>.
+///
+/// Assumes JSON formatting, if you need other deserialization formats, implement the parse
+/// method for your controller and payload type.
+pub trait Parse<'a, Payload>: Send + 'a
+where
+    Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
+{
+    fn parse(
+        self: Arc<Self>,
+        req: Request<&'a [u8]>,
+    ) -> BoxFuture<'a, anyhow::Result<Request<Payload>>> {
+        Box::pin(async move {
+            let (parts, bytes) = req.into_parts();
+            let body = serde_json::from_slice(&bytes)?;
+            Ok(Request::from_parts(parts, body))
+        })
+    }
+}
 
-                let headers_mut = builder.headers_mut().unwrap();
-                {
-                    for (k, v) in Self::headers() {
-                        headers_mut.insert(
-                            HeaderName::from_bytes(k.as_bytes())?,
-                            HeaderValue::from_str(&v)?,
-                        );
-                    }
+/// Convert a Response<Payload> into a Response<Vec<u8>>
+///
+/// Assumes JSON body format, automatically adds Content-Type: application/json and
+/// Content-Length headers.  If you need a different headers, implement the headers()
+/// associated method.  If you need a different serialization format, implement the `reply`
+/// method.
+pub trait Reply<'a, Payload>: Send + 'a
+where
+    Payload: serde::Serialize + Send + 'a,
+{
+    /// Sets default headers on the Response before sending the Response to the client.
+    fn headers() -> HashMap<String, String> {
+        let mut hash_map = HashMap::new();
+        hash_map.insert("content-type".into(), "application/json".into());
+        hash_map
+    }
+
+    fn reply(
+        self: Arc<Self>,
+        body: Payload,
+    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
+        Box::pin(async move {
+            let mut builder = Response::builder().status(200);
+
+            let body_bytes = serde_json::to_vec(&body)?;
+
+            let headers_mut = builder.headers_mut().unwrap();
+            {
+                for (k, v) in Self::headers() {
+                    headers_mut.insert(
+                        HeaderName::from_bytes(k.as_bytes())?,
+                        HeaderValue::from_str(&v)?,
+                    );
                 }
+                headers_mut.insert("content-length", HeaderValue::from(body_bytes.len()));
+            }
 
-                let json_body_bytes = serde_json::to_vec(&body)?;
-                Ok(builder.body(json_body_bytes)?)
-            })
-        }
+            Ok(builder.body(body_bytes)?)
+        })
+    }
+}
+
+/// Convert a Response<Error> into a Response<Vec<u8>>
+///
+/// Basically the same thing as `Reply` but supports error codes.
+///
+/// Assumes JSON body format, automatically adds Content-Type: application/json and
+/// Content-Length headers.  If you need a different headers, implement the headers()
+/// associated method.  If you need a different serialization format, implement the `error`
+/// method.
+pub trait Error<'a, Payload, const CODE: u16>: Send + 'a
+where
+    Payload: serde::Serialize + Send + 'a,
+{
+    fn headers() -> HashMap<String, String> {
+        let mut hash_map = HashMap::new();
+        hash_map.insert("content-type".into(), "application/json".into());
+        hash_map
     }
 
-    /// Create a resource and return it to the client.
-    pub trait Create<'a, Req, Res>: Parse<'a, Req> + Reply<'a, Res>
-    where
-        Req: for<'de> serde::Deserialize<'de> + Send + 'a,
-        Res: serde::Serialize + Send + 'a,
-    {
-        fn create(
-            self: Arc<Self>,
-            req: Request<Req>,
-            params: HashMap<String, String>,
-        ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
-    }
+    fn error(
+        self: Arc<Self>,
+        body: Payload,
+    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
+        Box::pin(async move {
+            let mut builder = Response::builder().status(CODE);
 
-    /// Read many resources or a single resource by id and return the resource(s) to the client.
-    pub trait Read<'a, Res>: IdParam + Reply<'a, Res>
-    where
-        Res: serde::Serialize + Send + 'a,
-    {
-        fn read(
-            self: Arc<Self>,
-            _req: Request<&'a [u8]>,
-            _params: HashMap<String, String>,
-        ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
-    }
+            let headers_mut = builder.headers_mut().unwrap();
+            {
+                for (k, v) in Self::headers() {
+                    headers_mut.insert(
+                        HeaderName::from_bytes(k.as_bytes())?,
+                        HeaderValue::from_str(&v)?,
+                    );
+                }
+            }
 
-    /// Update a resource by id and return the updated resource to the client.
-    pub trait Update<'a, Req, Res>: IdParam + Parse<'a, Req> + Reply<'a, Res>
-    where
-        Req: for<'de> serde::Deserialize<'de> + Send + 'a,
-        Res: serde::Serialize + Send + 'a,
-    {
-        fn update(
-            self: Arc<Self>,
-            req: Request<Req>,
-            params: HashMap<String, String>,
-        ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
+            let json_body_bytes = serde_json::to_vec(&body)?;
+            Ok(builder.body(json_body_bytes)?)
+        })
     }
+}
 
-    /// Delete a resource by id and return the deleted resource to the client.
-    pub trait Delete<'a, Res>: IdParam + Reply<'a, Res>
-    where
-        Res: serde::Serialize + Send + 'a,
-    {
-        fn delete(
-            self: Arc<Self>,
-            _req: Request<&'a [u8]>,
-            _params: HashMap<String, String>,
-        ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
-    }
+/// Create a resource and return it to the client.
+pub trait Create<'a, Req, Res>: Parse<'a, Req> + Reply<'a, Res>
+where
+    Req: for<'de> serde::Deserialize<'de> + Send + 'a,
+    Res: serde::Serialize + Send + 'a,
+{
+    fn create(
+        self: Arc<Self>,
+        req: Request<Req>,
+        params: HashMap<String, String>,
+    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
+}
+
+/// Read many resources or a single resource by id and return the resource(s) to the client.
+pub trait Read<'a, Res>: IdParam + Reply<'a, Res>
+where
+    Res: serde::Serialize + Send + 'a,
+{
+    fn read(
+        self: Arc<Self>,
+        _req: Request<&'a [u8]>,
+        _params: HashMap<String, String>,
+    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
+}
+
+/// Update a resource by id and return the updated resource to the client.
+pub trait Update<'a, Req, Res>: IdParam + Parse<'a, Req> + Reply<'a, Res>
+where
+    Req: for<'de> serde::Deserialize<'de> + Send + 'a,
+    Res: serde::Serialize + Send + 'a,
+{
+    fn update(
+        self: Arc<Self>,
+        req: Request<Req>,
+        params: HashMap<String, String>,
+    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
+}
+
+/// Delete a resource by id and return the deleted resource to the client.
+pub trait Delete<'a, Res>: IdParam + Reply<'a, Res>
+where
+    Res: serde::Serialize + Send + 'a,
+{
+    fn delete(
+        self: Arc<Self>,
+        _req: Request<&'a [u8]>,
+        _params: HashMap<String, String>,
+    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
 }
