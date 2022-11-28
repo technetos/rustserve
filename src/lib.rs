@@ -5,7 +5,7 @@ use http::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 // ----------------------------
 // Controllers
@@ -40,6 +40,32 @@ pub trait Controller: Send + Sync {
 }
 
 // ----------------------------
+// Filters
+
+pub enum RequestFilterOutcome<'a> {
+    Pass(Request<&'a [u8]>, HashMap<String, String>),
+    Fail(Response<Vec<u8>>),
+}
+
+pub enum ResponseFilterOutcome {
+    Pass(Response<Vec<u8>>),
+    Fail(Response<Vec<u8>>),
+}
+
+pub trait Filter: Send + Sync {
+    fn filter_request<'a>(
+        self: Arc<Self>,
+        _: Request<&'a [u8]>,
+        _: HashMap<String, String>,
+    ) -> BoxFuture<'a, anyhow::Result<RequestFilterOutcome<'a>>>;
+
+    fn filter_response<'a>(
+        self: Arc<Self>,
+        _: Response<Vec<u8>>,
+    ) -> BoxFuture<'a, anyhow::Result<ResponseFilterOutcome>>;
+}
+
+// ----------------------------
 // Routing
 
 struct StaticSegment {
@@ -58,14 +84,25 @@ struct DynamicSegment {
 /// handle the request.  Path are formatted using `:` to designate a dynamic segment.  For example
 /// in the path `/:version/test`, `version` is a dynamic segment, it can be 1, 2, 3, or anything
 /// really, and `test` is a static segment that must be matched exactly.  
+///
+/// Filters are run on the request on the route in order and then in reverse on the response
 pub struct Route {
     dynamic_segments: Vec<DynamicSegment>,
     static_segments: Vec<StaticSegment>,
     controller: Arc<dyn Controller>,
+    filters: Vec<Arc<dyn Filter>>,
 }
 
 impl Route {
     pub fn new(s: impl Into<String>, controller: Arc<dyn Controller>) -> Self {
+        Self::filtered(s, controller, vec![])
+    }
+
+    pub fn filtered(
+        s: impl Into<String>,
+        controller: Arc<dyn Controller>,
+        filters: Vec<Arc<dyn Filter>>,
+    ) -> Self {
         let input = s.into();
 
         let (dynamic_segments_vec, static_segments_vec) = input
@@ -94,6 +131,7 @@ impl Route {
             dynamic_segments,
             static_segments,
             controller,
+            filters,
         }
     }
 
@@ -155,26 +193,36 @@ pub async fn route_request<'a>(
     req: Request<&'a [u8]>,
     routes: Arc<Vec<Route>>,
 ) -> anyhow::Result<Response<Vec<u8>>> {
-    let method = req.method().as_str();
-    let path = req.uri().path();
+    let path = String::from(req.uri().path());
+    let method = String::from(req.method().as_str());
 
-    let req_method_path = format!("{method} {path}");
+    let res = if let Some(route) = routes.iter().find(|route| **route == RawRoute::new(&path)) {
+        let controller = route.controller.clone();
 
-    let res = if let Some(route) = routes.iter().find(|route| **route == RawRoute::new(path)) {
-        let params = route.extract_params(path);
-        let controller = &route.controller.clone();
-        let res = match method {
-            "GET" => controller.clone().get(req, params),
-            "HEAD" => controller.clone().head(req, params),
-            "POST" => controller.clone().post(req, params),
-            "PUT" => controller.clone().put(req, params),
-            "DELETE" => controller.clone().delete(req, params),
-            "OPTIONS" => controller.clone().options(req, params),
-            "PATCH" => controller.clone().patch(req, params),
+        let mut parameters = route.extract_params(&path);
+        let mut request = req;
+
+        for filter in &route.filters {
+            match filter.clone().filter_request(request, parameters).await? {
+                RequestFilterOutcome::Pass(req, params) => {
+                    request = req;
+                    parameters = params;
+                }
+                RequestFilterOutcome::Fail(res) => return Ok(res),
+            }
+        }
+
+        let controller = controller.clone();
+
+        let res = match &method[..] {
+            "GET" => controller.get(request, parameters),
+            "HEAD" => controller.head(request, parameters),
+            "POST" => controller.post(request, parameters),
+            "PUT" => controller.put(request, parameters),
+            "DELETE" => controller.delete(request, parameters),
+            "OPTIONS" => controller.options(request, parameters),
+            "PATCH" => controller.patch(request, parameters),
             _ => Box::pin(async move {
-                // content length??
-                // content type??
-                // this needs a proper formatter
                 Response::builder()
                     .status(400)
                     .body(Vec::from(&b"unsupported HTTP method"[..]))
@@ -186,18 +234,29 @@ pub async fn route_request<'a>(
         if let Err(e) = res {
             tracing::error!("{e}");
             Ok(Response::builder().status(500).body(vec![])?)
+                .map_err(|e: &(dyn std::error::Error + Send + Sync)| anyhow::Error::from(e))
         } else {
-            res
+            let mut response = res.unwrap();
+            for filter in route.filters.iter().rev() {
+                match filter.clone().filter_response(response).await? {
+                    ResponseFilterOutcome::Pass(res) => {
+                        response = res;
+                    }
+                    ResponseFilterOutcome::Fail(res) => return Ok(res),
+                }
+            }
+            Ok(response)
         }
     } else {
         Ok(Response::builder().status(404).body(vec![])?)
     }?;
 
+    let req_method_path = format!("{method} {path}");
+
     let res_status = res.status();
     let diagnostic_str = format!("{req_method_path} => {res_status}");
     match res_status.as_u16() {
-        500..=599 => error!("{diagnostic_str}"),
-        400..=499 => warn!("{diagnostic_str}"),
+        400..=599 => error!("{diagnostic_str}"),
         100..=399 => info!("{diagnostic_str}"),
         _ => error!("{diagnostic_str}"),
     }
@@ -228,7 +287,7 @@ pub trait QueryParams {
     }
 }
 
-/// Parse an incoming Request<&'a [u8]> into a Request<Payload>.
+/// Parse an incoming `Request<&'a [u8]>` into a `Request<Payload>`.
 ///
 /// Assumes JSON formatting, if you need other deserialization formats, implement the parse
 /// method for your controller and payload type.
@@ -265,10 +324,7 @@ where
         hash_map
     }
 
-    fn reply(
-        self: Arc<Self>,
-        body: Payload,
-    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
+    fn reply(self: Arc<Self>, body: Payload) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
         Box::pin(async move {
             let mut builder = Response::builder().status(200);
 
@@ -282,7 +338,6 @@ where
                         HeaderValue::from_str(&v)?,
                     );
                 }
-                headers_mut.insert("content-length", HeaderValue::from(body_bytes.len()));
             }
 
             Ok(builder.body(body_bytes)?)
@@ -290,7 +345,7 @@ where
     }
 }
 
-/// Convert a Response<Error> into a Response<Vec<u8>>
+/// Convert a `Response<Error>` into a `Response<Vec<u8>>`
 ///
 /// Basically the same thing as `Reply` but supports error codes.
 ///
@@ -308,10 +363,7 @@ where
         hash_map
     }
 
-    fn error(
-        self: Arc<Self>,
-        body: Payload,
-    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
+    fn error(self: Arc<Self>, body: Payload) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
         Box::pin(async move {
             let mut builder = Response::builder().status(CODE);
 
@@ -329,54 +381,4 @@ where
             Ok(builder.body(json_body_bytes)?)
         })
     }
-}
-
-/// Create a resource and return it to the client.
-pub trait Create<'a, Req, Res>: Parse<'a, Req> + Reply<'a, Res>
-where
-    Req: for<'de> serde::Deserialize<'de> + Send + 'a,
-    Res: serde::Serialize + Send + 'a,
-{
-    fn create(
-        self: Arc<Self>,
-        req: Request<Req>,
-        params: HashMap<String, String>,
-    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
-}
-
-/// Read many resources or a single resource by id and return the resource(s) to the client.
-pub trait Read<'a, Res>: IdParam + Reply<'a, Res>
-where
-    Res: serde::Serialize + Send + 'a,
-{
-    fn read(
-        self: Arc<Self>,
-        _req: Request<&'a [u8]>,
-        _params: HashMap<String, String>,
-    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
-}
-
-/// Update a resource by id and return the updated resource to the client.
-pub trait Update<'a, Req, Res>: IdParam + Parse<'a, Req> + Reply<'a, Res>
-where
-    Req: for<'de> serde::Deserialize<'de> + Send + 'a,
-    Res: serde::Serialize + Send + 'a,
-{
-    fn update(
-        self: Arc<Self>,
-        req: Request<Req>,
-        params: HashMap<String, String>,
-    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
-}
-
-/// Delete a resource by id and return the deleted resource to the client.
-pub trait Delete<'a, Res>: IdParam + Reply<'a, Res>
-where
-    Res: serde::Serialize + Send + 'a,
-{
-    fn delete(
-        self: Arc<Self>,
-        _req: Request<&'a [u8]>,
-        _params: HashMap<String, String>,
-    ) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>>;
 }
