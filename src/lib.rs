@@ -319,9 +319,7 @@ where
 {
     /// Sets default headers on the Response before sending the Response to the client.
     fn headers() -> HashMap<String, String> {
-        let mut hash_map = HashMap::new();
-        hash_map.insert("content-type".into(), "application/json".into());
-        hash_map
+        HashMap::from([("content-type".into(), "application/json".into())])
     }
 
     fn reply(self: Arc<Self>, body: Payload) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
@@ -358,9 +356,7 @@ where
     Payload: serde::Serialize + Send + 'a,
 {
     fn headers() -> HashMap<String, String> {
-        let mut hash_map = HashMap::new();
-        hash_map.insert("content-type".into(), "application/json".into());
-        hash_map
+        HashMap::from([("content-type".into(), "application/json".into())])
     }
 
     fn error(self: Arc<Self>, body: Payload) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
