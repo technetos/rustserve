@@ -267,9 +267,15 @@ pub async fn route_request<'a>(
 /// Parameter name in the URI for identifying the resource.  Defaults to `id`.
 ///
 /// If you want to change the id field name for a resource, simply implement the `id` method.
-pub trait IdParam {
-    fn id(self: Arc<Self>) -> String {
+pub trait IdParam: Send + Sync {
+    fn id() -> String {
         "id".into()
+    }
+}
+
+pub trait NotFound: Send + Sync {
+    fn not_found() -> anyhow::Result<Response<Vec<u8>>> {
+        Ok(Response::builder().status(404).body(vec![])?)
     }
 }
 
@@ -375,6 +381,87 @@ where
 
             let json_body_bytes = serde_json::to_vec(&body)?;
             Ok(builder.body(json_body_bytes)?)
+        })
+    }
+}
+
+/// Sets additional headers on the request.
+pub trait AdditionalServiceHeaders<'a> {
+    fn additional_headers(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
+        Box::pin(async move { Ok(HashMap::new()) })
+    }
+}
+
+/// Construct a request to an http service and parse the response.
+pub trait ServiceCall<'a, ReqPayload, ResPayload>: AdditionalServiceHeaders<'a> + Sync + Send + 'a
+where
+    ReqPayload: serde::Serialize + Send + 'a,
+    ResPayload: for<'de> serde::Deserialize<'de> + Send + 'a,
+{
+
+    /// Sets the URI on the Request.
+    fn addr(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<String>>;
+
+    /// Sets the method on the Request.
+    fn method() -> http::Method;
+
+    fn service_name(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<String>>;
+
+    /// Sets default headers on the Request.
+    fn headers(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
+        Box::pin(async move {
+            let mut hash_map = HashMap::from([(
+                "content-type".into(),
+                "application/json".into(),
+            )]);
+
+
+            hash_map.extend(self.additional_headers().await?);
+
+            Ok(hash_map)
+        })
+    }
+
+    fn create_request(
+        self: Arc<Self>,
+        path: &'a str,
+        payload: ReqPayload,
+    ) -> BoxFuture<'a, anyhow::Result<Request<Vec<u8>>>> {
+        Box::pin(async move {
+            let uri = http::Uri::builder()
+                .scheme("https")
+                .authority(&self.clone().addr().await?[..])
+                .path_and_query(path)
+                .build()
+                .unwrap();
+
+            let mut request_builder = http::request::Builder::new()
+                .method(Self::method())
+                .uri(uri);
+
+            let headers_mut = request_builder.headers_mut().unwrap();
+            {
+                for (k, v) in self.clone().headers().await? {
+                    headers_mut.insert(
+                        HeaderName::from_bytes(k.as_bytes())?,
+                        HeaderValue::from_str(&v)?,
+                    );
+                }
+            }
+
+            Ok(request_builder.body(serde_json::to_vec(&payload)?)?)
+        })
+    }
+
+    /// Convert a `Response<&'a [u8]>` to a `Response<'a, ResPayload>`
+    fn parse_response(
+        self: Arc<Self>,
+        res: Response<Vec<u8>>,
+    ) -> BoxFuture<'a, anyhow::Result<Response<ResPayload>>> {
+        Box::pin(async move {
+            let (parts, bytes) = res.into_parts();
+            let body = serde_json::from_slice(&bytes)?;
+            Ok(Response::from_parts(parts, body))
         })
     }
 }
