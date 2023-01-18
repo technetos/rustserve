@@ -386,14 +386,14 @@ where
 }
 
 /// Sets additional headers on the request.
-pub trait AdditionalServiceHeaders<'a> {
+pub trait AdditionalServiceHeaders<'a, ReqPayload, ResPayload> {
     fn additional_headers(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
         Box::pin(async move { Ok(HashMap::new()) })
     }
 }
 
 /// Construct a request to an http service and parse the response.
-pub trait ServiceCall<'a, ReqPayload, ResPayload>: AdditionalServiceHeaders<'a> + Sync + Send + 'a
+pub trait ServiceCall<'a, ReqPayload, ResPayload>: AdditionalServiceHeaders<'a, ReqPayload, ResPayload> + Sync + Send + 'a
 where
     ReqPayload: serde::Serialize + Send + 'a,
     ResPayload: for<'de> serde::Deserialize<'de> + Send + 'a,
