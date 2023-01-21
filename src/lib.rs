@@ -148,6 +148,24 @@ impl Route {
                 hash_map
             })
     }
+
+    pub fn full_path(&self) -> String {
+        let size = self.static_segments.len() + self.dynamic_segments.len();
+        let mut combined = Vec::with_capacity(size);
+
+        for _ in 0..size {
+            combined.push(String::new());
+        }
+
+        for segment in &self.static_segments[..] {
+            combined[segment.position] = segment.content.clone();
+        }
+        for segment in &self.dynamic_segments[..] {
+            combined[segment.position] = format!(":{}", segment.name);
+        }
+
+        format!("/{}", combined.join("/"))
+    }
 }
 
 impl<'a> PartialEq<RawRoute> for Route {
