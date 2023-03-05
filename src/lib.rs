@@ -410,8 +410,26 @@ pub trait AdditionalServiceHeaders<'a, ReqPayload, ResPayload> {
     }
 }
 
+pub trait ServiceResponse<'a, ReqPayload, ResPayload>
+where
+    ReqPayload: serde::Serialize + Send + 'a,
+    ResPayload: for<'de> serde::Deserialize<'de> + Send + 'a,
+{
+    /// Convert a `Response<&'a [u8]>` to a `Response<'a, ResPayload>`
+    fn parse_response(
+        self: Arc<Self>,
+        res: Response<Vec<u8>>,
+    ) -> BoxFuture<'a, anyhow::Result<Response<ResPayload>>> {
+        Box::pin(async move {
+            let (parts, bytes) = res.into_parts();
+            let body = serde_json::from_slice(&bytes)?;
+            Ok(Response::from_parts(parts, body))
+        })
+    }
+}
+
 /// Construct a request to an http service and parse the response.
-pub trait ServiceCall<'a, ReqPayload, ResPayload>: AdditionalServiceHeaders<'a, ReqPayload, ResPayload> + Sync + Send + 'a
+pub trait ServiceRequest<'a, ReqPayload, ResPayload>: ServiceResponse<'a, ReqPayload, ResPayload> + AdditionalServiceHeaders<'a, ReqPayload, ResPayload> + Sync + Send + 'a
 where
     ReqPayload: serde::Serialize + Send + 'a,
     ResPayload: for<'de> serde::Deserialize<'de> + Send + 'a,
@@ -423,7 +441,7 @@ where
     /// Sets the method on the Request.
     fn method() -> http::Method;
 
-    fn service_name(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<String>>;
+    fn service_name() -> &'static str;
 
     /// Sets default headers on the Request.
     fn headers(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
@@ -432,7 +450,6 @@ where
                 "content-type".into(),
                 "application/json".into(),
             )]);
-
 
             hash_map.extend(self.additional_headers().await?);
 
@@ -446,9 +463,11 @@ where
         payload: ReqPayload,
     ) -> BoxFuture<'a, anyhow::Result<Request<Vec<u8>>>> {
         Box::pin(async move {
+            let addr = self.clone().addr().await?;
+
             let uri = http::Uri::builder()
                 .scheme("https")
-                .authority(&self.clone().addr().await?[..])
+                .authority(if addr.contains(":") { &addr.split(":").nth(0).unwrap()[..] } else { &addr })
                 .path_and_query(path)
                 .build()
                 .unwrap();
@@ -468,18 +487,6 @@ where
             }
 
             Ok(request_builder.body(serde_json::to_vec(&payload)?)?)
-        })
-    }
-
-    /// Convert a `Response<&'a [u8]>` to a `Response<'a, ResPayload>`
-    fn parse_response(
-        self: Arc<Self>,
-        res: Response<Vec<u8>>,
-    ) -> BoxFuture<'a, anyhow::Result<Response<ResPayload>>> {
-        Box::pin(async move {
-            let (parts, bytes) = res.into_parts();
-            let body = serde_json::from_slice(&bytes)?;
-            Ok(Response::from_parts(parts, body))
         })
     }
 }
