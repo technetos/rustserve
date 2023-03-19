@@ -1,4 +1,4 @@
-use futures::future::BoxFuture;
+use futures::{future::BoxFuture, Future};
 use http::{
     header::{HeaderName, HeaderValue},
     Request, Response,
@@ -319,15 +319,45 @@ pub trait Parse<'a, Payload>: Send + 'a
 where
     Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
 {
-    fn parse(
-        self: Arc<Self>,
-        req: Request<&'a [u8]>,
-    ) -> BoxFuture<'a, anyhow::Result<Request<Payload>>> {
-        Box::pin(async move {
-            let (parts, bytes) = req.into_parts();
-            let body = serde_json::from_slice(&bytes)?;
-            Ok(Request::from_parts(parts, body))
-        })
+    type ParseFuture: Future<Output = anyhow::Result<Request<Payload>>>;
+    fn parse(self: Arc<Self>, req: Request<&'a [u8]>) -> Self::ParseFuture;
+}
+
+pub struct ParseFuture<'a, Payload>
+where
+    Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
+{
+    request: Option<Request<&'a [u8]>>,
+    phantom_data: std::marker::PhantomData<Payload>,
+}
+
+impl<'a, Payload> ParseFuture<'a, Payload>
+where
+    Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
+{
+    pub fn new(request: Request<&'a [u8]>) -> Self {
+        Self {
+            request: Some(request),
+            phantom_data: std::marker::PhantomData::default(),
+        }
+    }
+}
+
+impl<'a, Payload: Unpin> Future for ParseFuture<'a, Payload>
+where
+    Payload: for<'de> serde::Deserialize<'de> + Send + 'a,
+{
+    type Output = anyhow::Result<Request<Payload>>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // TODO probably smart to fail better here than just .unwrap()'ing. This only breaks when
+        // you .await this future twice...so dont do that and it should be fine
+        let (parts, bytes) = self.request.take().unwrap().into_parts();
+        let body_bytes = serde_json::from_slice(&bytes)?;
+        std::task::Poll::Ready(Ok(Request::from_parts(parts, body_bytes)))
     }
 }
 
@@ -337,33 +367,59 @@ where
 /// Content-Length headers.  If you need a different headers, implement the headers()
 /// associated method.  If you need a different serialization format, implement the `reply`
 /// method.
-pub trait Reply<'a, Payload>: Send + 'a
+pub trait Reply<Payload>: Send
 where
-    Payload: serde::Serialize + Send + 'a,
+    Payload: serde::Serialize + Send,
 {
+    type ReplyFuture: Future<Output = anyhow::Result<Response<Vec<u8>>>>;
+
     /// Sets default headers on the Response before sending the Response to the client.
     fn headers() -> HashMap<String, String> {
         HashMap::from([("content-type".into(), "application/json".into())])
     }
 
-    fn reply(self: Arc<Self>, body: Payload) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
-        Box::pin(async move {
-            let mut builder = Response::builder().status(200);
+    fn reply(self: Arc<Self>, body: Payload) -> Self::ReplyFuture;
+}
 
-            let body_bytes = serde_json::to_vec(&body)?;
+pub struct ReplyFuture<Payload> {
+    payload: Payload,
+    headers: HashMap<String, String>,
+}
 
-            let headers_mut = builder.headers_mut().unwrap();
-            {
-                for (k, v) in Self::headers() {
-                    headers_mut.insert(
-                        HeaderName::from_bytes(k.as_bytes())?,
-                        HeaderValue::from_str(&v)?,
-                    );
-                }
+impl<Payload> ReplyFuture<Payload>
+where
+    Payload: serde::Serialize + Send,
+{
+    pub fn new(payload: Payload, headers: HashMap<String, String>) -> Self {
+        Self { payload, headers }
+    }
+}
+
+impl<Payload> Future for ReplyFuture<Payload>
+where
+    Payload: serde::Serialize + Unpin + Send,
+{
+    type Output = anyhow::Result<Response<Vec<u8>>>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let body_bytes = serde_json::to_vec(&self.payload)?;
+
+        let mut builder = Response::builder().status(200);
+
+        let headers_mut = builder.headers_mut().unwrap();
+        {
+            for (k, v) in &self.headers {
+                headers_mut.insert(
+                    HeaderName::from_bytes(k.as_bytes())?,
+                    HeaderValue::from_str(&v)?,
+                );
             }
+        }
 
-            Ok(builder.body(body_bytes)?)
-        })
+        std::task::Poll::Ready(Ok(builder.body(body_bytes)?))
     }
 }
 
@@ -375,81 +431,91 @@ where
 /// Content-Length headers.  If you need a different headers, implement the headers()
 /// associated method.  If you need a different serialization format, implement the `error`
 /// method.
-pub trait Error<'a, Payload, const CODE: u16>: Send + 'a
+pub trait Error<Payload, const CODE: u16>: Send
 where
-    Payload: serde::Serialize + Send + 'a,
+    Payload: serde::Serialize + Send,
 {
+    type ErrorFuture: Future<Output = anyhow::Result<Response<Vec<u8>>>>;
+
     fn headers() -> HashMap<String, String> {
         HashMap::from([("content-type".into(), "application/json".into())])
     }
 
-    fn error(self: Arc<Self>, body: Payload) -> BoxFuture<'a, anyhow::Result<Response<Vec<u8>>>> {
-        Box::pin(async move {
-            let mut builder = Response::builder().status(CODE);
+    fn error(self: Arc<Self>, body: Payload) -> Self::ErrorFuture;
+}
 
-            let headers_mut = builder.headers_mut().unwrap();
-            {
-                for (k, v) in Self::headers() {
-                    headers_mut.insert(
-                        HeaderName::from_bytes(k.as_bytes())?,
-                        HeaderValue::from_str(&v)?,
-                    );
-                }
+pub struct ErrorFuture<Payload, const CODE: u16> {
+    payload: Payload,
+    headers: HashMap<String, String>,
+}
+
+impl<Payload, const CODE: u16> ErrorFuture<Payload, CODE>
+where
+    Payload: serde::Serialize + Send,
+{
+    pub fn new(payload: Payload, headers: HashMap<String, String>) -> Self {
+        Self { payload, headers }
+    }
+}
+
+impl<Payload, const CODE: u16> Future for ErrorFuture<Payload, CODE>
+where
+    Payload: serde::Serialize + Unpin + Send,
+{
+    type Output = anyhow::Result<Response<Vec<u8>>>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let body_bytes = serde_json::to_vec(&self.payload)?;
+
+        let mut builder = Response::builder().status(CODE);
+
+        let headers_mut = builder.headers_mut().unwrap();
+        {
+            for (k, v) in &self.headers {
+                headers_mut.insert(
+                    HeaderName::from_bytes(k.as_bytes())?,
+                    HeaderValue::from_str(&v)?,
+                );
             }
+        }
 
-            let json_body_bytes = serde_json::to_vec(&body)?;
-            Ok(builder.body(json_body_bytes)?)
-        })
+        std::task::Poll::Ready(Ok(builder.body(body_bytes)?))
     }
 }
 
-/// Sets additional headers on the request.
-pub trait AdditionalServiceHeaders<'a, ReqPayload, ResPayload> {
-    fn additional_headers(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
-        Box::pin(async move { Ok(HashMap::new()) })
-    }
-}
-
-pub trait ServiceResponse<'a, ReqPayload, ResPayload>
-where
-    ReqPayload: serde::Serialize + Send + 'a,
-    ResPayload: for<'de> serde::Deserialize<'de> + Send + 'a,
-{
-    /// Convert a `Response<&'a [u8]>` to a `Response<'a, ResPayload>`
-    fn parse_response(
-        self: Arc<Self>,
-        res: Response<Vec<u8>>,
-    ) -> BoxFuture<'a, anyhow::Result<Response<ResPayload>>> {
-        Box::pin(async move {
-            let (parts, bytes) = res.into_parts();
-            let body = serde_json::from_slice(&bytes)?;
-            Ok(Response::from_parts(parts, body))
-        })
-    }
-}
-
-/// Construct a request to an http service and parse the response.
-pub trait ServiceRequest<'a, ReqPayload, ResPayload>: ServiceResponse<'a, ReqPayload, ResPayload> + AdditionalServiceHeaders<'a, ReqPayload, ResPayload> + Sync + Send + 'a
-where
-    ReqPayload: serde::Serialize + Send + 'a,
-    ResPayload: for<'de> serde::Deserialize<'de> + Send + 'a,
-{
+pub trait ServiceInfo<'a, ReqPayload, ResPayload> {
+    fn name() -> &'static str;
 
     /// Sets the URI on the Request.
     fn addr(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<String>>;
 
+    /// Sets additional headers on the request.
+    fn additional_headers(
+        self: Arc<Self>,
+    ) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
+        Box::pin(async move { Ok(HashMap::new()) })
+    }
+}
+
+/// Construct a request to an http service and parse the response.
+pub trait ServiceRequest<'a, ReqPayload, ResPayload>:
+    ServiceInfo<'a, ReqPayload, ResPayload> + Sync + Send + 'a
+where
+    ReqPayload: serde::Serialize + Send + 'a,
+    ResPayload: for<'de> serde::Deserialize<'de> + Send + Unpin + 'a,
+{
+    type ResponseFuture: Future<Output = anyhow::Result<Response<ResPayload>>>;
+
     /// Sets the method on the Request.
     fn method() -> http::Method;
-
-    fn service_name() -> &'static str;
 
     /// Sets default headers on the Request.
     fn headers(self: Arc<Self>) -> BoxFuture<'a, anyhow::Result<HashMap<String, String>>> {
         Box::pin(async move {
-            let mut hash_map = HashMap::from([(
-                "content-type".into(),
-                "application/json".into(),
-            )]);
+            let mut hash_map = HashMap::from([("content-type".into(), "application/json".into())]);
 
             hash_map.extend(self.additional_headers().await?);
 
@@ -459,15 +525,18 @@ where
 
     fn create_request(
         self: Arc<Self>,
+        addr: String,
         path: &'a str,
         payload: ReqPayload,
     ) -> BoxFuture<'a, anyhow::Result<Request<Vec<u8>>>> {
         Box::pin(async move {
-            let addr = self.clone().addr().await?;
-
             let uri = http::Uri::builder()
                 .scheme("https")
-                .authority(if addr.contains(":") { &addr.split(":").nth(0).unwrap()[..] } else { &addr })
+                .authority(if addr.contains(":") {
+                    &addr.split(":").nth(0).unwrap()[..]
+                } else {
+                    &addr
+                })
                 .path_and_query(path)
                 .build()
                 .unwrap();
@@ -488,5 +557,41 @@ where
 
             Ok(request_builder.body(serde_json::to_vec(&payload)?)?)
         })
+    }
+
+    /// Convert a `Response<&'a [u8]>` to a `Response<'a, ResPayload>`
+    fn parse_response(self: Arc<Self>, res: Response<Vec<u8>>) -> Self::ResponseFuture;
+}
+
+pub struct ParseResponseFuture<Payload> {
+    response: Option<Response<Vec<u8>>>,
+    phantom_data: std::marker::PhantomData<Payload>,
+}
+
+impl<Payload> ParseResponseFuture<Payload>
+where
+    Payload: for<'de> serde::Deserialize<'de> + Unpin + Send,
+{
+    pub fn new(response: Response<Vec<u8>>) -> Self {
+        Self {
+            response: Some(response),
+            phantom_data: std::marker::PhantomData::default(),
+        }
+    }
+}
+
+impl<Payload> Future for ParseResponseFuture<Payload>
+where
+    Payload: for<'de> serde::Deserialize<'de> + Unpin + Send,
+{
+    type Output = anyhow::Result<Response<Payload>>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let (parts, bytes) = self.response.take().unwrap().into_parts();
+        let body = serde_json::from_slice(&bytes)?;
+        std::task::Poll::Ready(Ok(Response::from_parts(parts, body)))
     }
 }
